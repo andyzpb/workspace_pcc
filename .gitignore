@@ -1,0 +1,12 @@
+# Ignore Python bytecode and caches
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.ipynb
+
+# Optional: virtual environments
+venv/
+.env/
+.venv/
