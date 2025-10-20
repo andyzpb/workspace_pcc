@@ -1,8 +1,11 @@
 from .specs import SegmentSpec, TranslationSpec
-from .core import PCCWorkspace
+from .core import PCCFKSolver
 
 __all__ = [
     "SegmentSpec",
     "TranslationSpec",
-    "PCCWorkspace",
+    "core",
+    "viz",
+    "volume_sampling",
+    "diagnostics",
 ]
