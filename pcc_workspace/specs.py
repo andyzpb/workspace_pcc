@@ -42,7 +42,6 @@ class SegmentSpec:
     theta_step: Optional[float] = None
 
     samples_phi: int = 1
-    phi_coupling: PhiCoupling = None
     phi_min: Optional[float] = None
     phi_max: Optional[float] = None
     phi_step: Optional[float] = None
@@ -61,7 +60,7 @@ class TouchPointSpec:
         x, y, z = self.coordinates
         nx, ny, nz = self.normal
         return (
-            f"Touch point at ({x:.3f}, {y:.3f}, {z:.3f}) "
+            f"Touch point at ({x:.5f}, {y:.5f}, {z:.5f}) "
             f"with normal ({nx:.3f}, {ny:.3f}, {nz:.3f})."
         )
 

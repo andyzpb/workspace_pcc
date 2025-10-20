@@ -1,3 +1,4 @@
+import math
 import numpy as np
 from typing import Tuple, List
 from pcc_workspace.specs import TouchPointSpec
@@ -22,18 +23,24 @@ def _axis_angle_R(u: np.ndarray, th: float) -> np.ndarray:
     I = np.eye(3, dtype=float)
     return c*I + (1.0-c)*np.outer(u, u) + s*K
 
-def _cc_T(phi: float, kappa: float, theta: float) -> np.ndarray:
+def _cc_T(phi: float, kappa: float, theta: float, s: float | None = None) -> np.ndarray:
+    """Constant-curvature transform with optional straight-segment fallback length s."""
     T = np.eye(4, dtype=float)
-    if abs(theta) < 1e-12 or abs(kappa) < 1e-12:
-        s = 0.0 if abs(kappa) < 1e-12 else theta / kappa
-        p0 = np.array([0.5*s*theta, 0.0, s], dtype=float)
+    eps = 1e-12
+
+    if abs(theta) < eps or abs(kappa) < eps:
+        if s is None:
+            s = (theta / kappa) if abs(kappa) > eps else 0.0
+        p0 = np.array([0.0, 0.0, float(s)], dtype=float)
         R = _axis_angle_R(np.array([-np.sin(phi), np.cos(phi), 0.0], dtype=float), theta)
         p = _rotz(phi) @ p0
     else:
         r = 1.0 / kappa
-        p0 = np.array([r*(1.0 - float(np.cos(theta))), 0.0, r*float(np.sin(theta))], dtype=float)
-        R = _axis_angle_R(np.array([-np.sin(phi), np.cos(phi), 0.0], dtype=float), theta)
-        p = _rotz(phi) @ p0
+        c, s_trig = float(np.cos(theta)), float(np.sin(theta))
+        p0 = np.array([r*(1.0 - c), 0.0, r*s_trig], dtype=float)
+        R  = _axis_angle_R(np.array([-np.sin(phi), np.cos(phi), 0.0], dtype=float), theta)
+        p  = _rotz(phi) @ p0
+
     T[:3,:3] = R
     T[:3, 3] = p
     return T
@@ -49,21 +56,20 @@ def make_touch_prebend_passive(theta1_deg, phi1_deg,
                                L1_active=0.05, L_rigid=0.003):
     th1, ph1 = np.deg2rad(theta1_deg), np.deg2rad(phi1_deg)
     th2, ph2 = np.deg2rad(theta2_deg), np.deg2rad(phi2_deg)
-    # outer (active only)
+
     k1 = 0.0 if abs(th1) < 1e-12 else th1 / L1_active
-    T1 = _cc_T(ph1, k1, th1)
-    # inner: passive -> active -> rigid
+    T1 = _cc_T(ph1, k1, th1, s=L1_active)
+
     T2_pas  = np.eye(4); T2_pas[2,3] = float(L2_passive)
     k2 = 0.0 if abs(th2) < 1e-12 else th2 / L2_active
-    T2_act  = _cc_T(ph2, k2, th2)
+    T2_act  = _cc_T(ph2, k2, th2, s=L2_active)
     T2_rig  = np.eye(4); T2_rig[2,3] = float(L_rigid)
 
     T_tip = T1 @ T2_pas @ T2_act @ T2_rig
     R_tip, p_tip = T_tip[:3,:3], T_tip[:3,3]
     alpha = np.deg2rad(bevel_angle_deg)
-    b_world = _normalize(R_tip @ np.array([np.sin(alpha),0.0,np.cos(alpha)]))
+    b_world = _normalize(R_tip @ np.array([np.sin(alpha), 0.0, np.cos(alpha)]))
     return (name, TouchPointSpec(coordinates=tuple(p_tip), normal=tuple(b_world)))
-
 L1_ACTIVE = 0.05          # outer bendable 5 cm
 L2A_MAX   = 0.006         # inner active ≤ 6 mm
 L2P_MAX   = 0.006         # inner passive ≤ 6 mm
@@ -72,7 +78,8 @@ L_RIGID   = 0.003         # inner rigid tip 3 mm
 
 _BASE_CASES = [
     #   θ1,  φ1,   θ2,  φ2,   L2a,    L2p,   name
-    (+135.0, 180.0, +90.0, 90.0, 0.006, 0.006, "N01"),
+    # NOTE: 1 ≤ θ2/θ2 =0 or no solution
+    (+1, 60, +1, 46, 0.006, 0.002, "N01"),
     (-10.0,  30.0, +22.0,  60.0, 0.006, 0.001, "N02"),
     (+14.0,  60.0, +24.0, 120.0, 0.006, 0.003, "N03"),
     (-12.0,  90.0, +20.0, 180.0, 0.005, 0.004, "N04"),

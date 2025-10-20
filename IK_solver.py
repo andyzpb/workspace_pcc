@@ -23,7 +23,6 @@ outer = SegmentSpec(
     phi_max=np.deg2rad(180.0) - 1e-5,
     samples_theta=270,
     samples_phi=720,
-    phi_coupling=None,
 )
 
 # Inner tube: active <= 0.006 m, rigid tip = 0.003 m (added in solver),
@@ -43,7 +42,6 @@ inner = SegmentSpec(
     phi_max=np.deg2rad(180.0) - 1e-5,
     samples_phi=720,
     active_L_max=0.006,  # <-- active 6 mm
-    phi_coupling=None,
     is_inner=True,
     bevel_angle_deg=45.0,
     roll_offset_deg=0.0,

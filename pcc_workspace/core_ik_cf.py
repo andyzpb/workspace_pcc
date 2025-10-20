@@ -55,29 +55,32 @@ def _axis_angle_R(u: np.ndarray, theta: float) -> np.ndarray:
     return c * I + (1.0 - c) * np.outer(u, u) + s * K
 
 
-def _cc_transform(phi: float, kappa: float, theta: float) -> np.ndarray:
-    """
-    Single PCC transform (active arc):
-      - Bend plane φ about axis u = Rz(φ) ey
-      - Curvature κ = θ / s (if s>0), arc angle θ
-    Robust to κ≈0 or θ≈0 via first-order-consistent straight limit.
-    """
+def _cc_transform(phi: float, kappa: float, theta: float, s_hint: float | None = None) -> np.ndarray:
+    eps = 1e-12
     T = np.eye(4, dtype=float)
-    if abs(kappa) < 1e-12 or abs(theta) < 1e-12:
-        s = 0.0 if abs(kappa) < 1e-12 else theta / max(kappa, 1e-12)
-        p0 = np.array([0.5 * s * theta, 0.0, s], dtype=float)
-        p = _rotz(phi) @ p0
-        u = np.array([-math.sin(phi), math.cos(phi), 0.0], dtype=float)
-        R = _axis_angle_R(u, theta)
+
+    R = _rotz(phi) @ _roty(theta) @ _rotz(-phi)
+
+    if (abs(theta) > eps) and (abs(kappa) > eps):
+        s = float(theta / kappa)
     else:
-        r = 1.0 / kappa
-        p0 = np.array([r * (1.0 - math.cos(theta)), 0.0, r * math.sin(theta)], float)
-        p = _rotz(phi) @ p0
-        u = np.array([-math.sin(phi), math.cos(phi), 0.0], dtype=float)
-        R = _axis_angle_R(u, theta)
+        s = float(s_hint or 0.0)
+
+    t = float(theta)
+    if abs(t) < 1e-6:
+        A = 0.5 * t - (t**3) / 24.0
+        B = 1.0 - (t**2) / 6.0 + (t**4) / 120.0
+    else:
+        A = (1.0 - math.cos(t)) / t
+        B = math.sin(t) / t
+
+    p0 = np.array([s * A, 0.0, s * B], dtype=float) 
+    p  = _rotz(phi) @ p0
+
     T[:3, :3] = R
-    T[:3, 3] = p
+    T[:3, 3]  = p
     return T
+
 
 
 def _snap_to_box(
@@ -200,7 +203,7 @@ def _build_T1_from_theta_phi(
     k1 = 0.0 if abs(theta1) < 1e-12 or abs(s1_active) < 1e-12 else (theta1 / s1_active)
     T_pass = np.eye(4, dtype=float)
     T_pass[2, 3] = float(L1_passive)
-    T_bend = _cc_transform(phi1, k1, theta1)
+    T_bend = _cc_transform(phi1, k1, theta1, s_hint=s1_active)
     T1 = T_pass @ T_bend
     P1 = T1[:3, 3].copy()
     return T1, P1
@@ -434,6 +437,10 @@ class PCCIKClosedForm:
         cos_th = (ux * wx + uz * wz) / den
         sin_th = (uz * wx - ux * wz) / den
         theta2 = math.atan2(sin_th, cos_th)
+        if abs(theta2) < np.deg2rad(0.5):
+            R2 = np.eye(3)
+            z2 = np.array([0.0, 0.0, 1.0], float)
+            return float(_wrap_0_2pi(phi2)), 0.0, z2, R2
         R2 = _rotz(phi2) @ _roty(theta2) @ _rotz(-phi2)
         z2 = R2[:, 2].copy()
         return float(_wrap_0_2pi(phi2)), float(theta2), z2, R2
@@ -441,40 +448,35 @@ class PCCIKClosedForm:
     # ---------- B. Inner lengths from target position (with rigid tip) ----------
     @staticmethod
     def _inner_lengths_from_position_prebend_rigid(
-        R1: np.ndarray,
-        p1: np.ndarray,
-        phi2: float,
-        theta2: float,
-        P_star: np.ndarray,
-        L_rigid: float,
-    ) -> Tuple[float, float]:
-        """
-        Correct order: inner = Passive(before bend) -> Active(arc) -> Rigid tip
-        In {P1,R1}:
-            q  = R1^T (P* - P1)
-            a  = Rz(φ2) [1-cosθ2, 0, sinθ2]
-            q = [0,0,L2p] + r*a + Lrig*z2, with r = s2 / θ2
-        Solve r from XY, then L2p from Z. Robust near θ2≈0.
-        """
-        q = R1.T @ (P_star - p1)
-        a = _rotz(phi2) @ np.array([1.0 - math.cos(theta2), 0.0, math.sin(theta2)], dtype=float)
+        R1, p1, phi2, theta2, P_star, L_rigid,
+        L2a_max, L2p_min, L2p_max, active_first=True,
+        th_free_eps: float = np.deg2rad(7),
+    ):
+        q  = R1.T @ (P_star - p1)
+        a  = _rotz(phi2) @ np.array([1.0 - math.cos(theta2), 0.0, math.sin(theta2)], float)
         R2 = _rotz(phi2) @ _roty(theta2) @ _rotz(-phi2)
         z2 = R2[:, 2]
+        q2 = q - L_rigid * z2
 
-        q2 = q - L_rigid * z2  # subtract rigid tip contribution
-
-        a_xy = a[:2]
-        q2_xy = q2[:2]
+        a_xy = a[:2]; q2_xy = q2[:2]
         denom = float(a_xy @ a_xy)
 
-        if denom < 1e-16 or abs(theta2) < 1e-12:
-            r = 0.0
-        else:
+        if (denom >= 1e-16) and (abs(theta2) >= th_free_eps):
             r = float(q2_xy @ a_xy) / denom
+            s2 = float(theta2 * r)
+            L2p = float(q2[2] - r * a[2])
+            return s2, L2p
 
-        s2 = 0.0 if abs(theta2) < 1e-12 else float(theta2 * r)
-        L2p = float(q2[2] - r * a[2])
-        return s2, L2p
+        rem = float(q2[2])           
+        rem = max(0.0, rem)          
+        if active_first:
+            s2  = min(rem, max(0.0, L2a_max))
+            L2p = rem - s2
+        else:
+            L2p = min(max(L2p_min, rem), L2p_max)
+            s2  = rem - L2p
+        return float(s2), float(L2p)
+
 
     # ---------- C. Gauss-Newton + Armijo line search + hard projections ----------
     def _refine_qp(
@@ -711,7 +713,8 @@ class PCCIKClosedForm:
         # position closed-form (subtract d on target side)
         P_star_d = P_target_world - np.array([0.0, 0.0, d], float)
         s2, L2_passive = self._inner_lengths_from_position_prebend_rigid(
-            R1, P1, phi2_wrapped, theta2, P_star_d, L_rigid
+            R1, P1, phi2_wrapped, theta2, P_star_d, L_rigid,
+            L2a_max, L2p_min, L2p_max, getattr(self.opts, "active_first", True)  # ★
         )
 
         # length boxes + ACTIVE-FIRST + TOTAL-LENGTH
@@ -736,7 +739,7 @@ class PCCIKClosedForm:
 
         # compose and check
         k2 = 0.0 if abs(theta2) < 1e-12 or abs(s2) < 1e-12 else (theta2 / s2)
-        T2_act = _cc_transform(phi2_wrapped, k2, theta2)
+        T2_act = _cc_transform(phi2_wrapped, k2, theta2,s_hint=s2)
         T_pass = np.eye(4); T_pass[2, 3] = float(L2_passive)  # pre-bend passive
         T_rig  = np.eye(4); T_rig[2, 3]  = float(L_rigid)     # post-bend rigid
         T_tip = T1 @ T_pass @ T2_act @ T_rig
