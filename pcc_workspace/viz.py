@@ -1,24 +1,13 @@
 from curses import meta
 from matplotlib.lines import Line2D
-from curses import meta
-from matplotlib.lines import Line2D
 import matplotlib.pyplot as plt
 import numpy as np
 from typing import Any, Optional, Sequence, Tuple, Union, Dict, List
 from .specs import IKSolution, TouchPointSpec
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from .core import PCCFKSolver, PCCIKSolver  # for type hint only
-import numpy as np
 import math
 import cupy as cp
-from typing import Any, Optional, Sequence, Tuple, Union, Dict, List
-from .specs import IKSolution, TouchPointSpec
-from mpl_toolkits.mplot3d.art3d import Poly3DCollection
-from .core import PCCFKSolver, PCCIKSolver  # for type hint only
-import numpy as np
-import math
-import cupy as cp
-
 
 def _voxel_downsample_indices(
     pts: np.ndarray,
@@ -478,7 +467,6 @@ def compute_dexterity_voxels3d(
     unique_count_full = np.bincount(
         vox_from_combo, minlength=max_id + 1
     )  # bins per voxel
-    )  # bins per voxel
     sample_count_full = np.bincount(nid, minlength=max_id + 1)  # raw samples per voxel
     coverage_full = unique_count_full.astype(float) / float(TOT)
 
@@ -695,14 +683,8 @@ def plot_dexterity_voxels3d(
     vmin: Optional[float] = 0.0,
     vmax: Optional[float] = 1.0,
     size_by_count: bool = False,
-    cmap: str = "viridis",
-    vmin: Optional[float] = 0.0,
-    vmax: Optional[float] = 1.0,
-    size_by_count: bool = False,
+    
 ):
-    """
-    Scatter plot of 3D voxel dexterity coverage.
-    """
     """
     Scatter plot of 3D voxel dexterity coverage.
     """
@@ -716,10 +698,8 @@ def plot_dexterity_voxels3d(
     if centers.shape[0] == 0:
         raise ValueError(
             "No voxels after filtering; enlarge `voxel` or lower `min_samples_per_voxel`."
-            "No voxels after filtering; enlarge `voxel` or lower `min_samples_per_voxel`."
         )
 
-    # decimation for big clouds
     # decimation for big clouds
     M = centers.shape[0]
     if M > max_points:
@@ -750,11 +730,6 @@ def plot_dexterity_voxels3d(
         centers[:, 1],
         centers[:, 2],
         c=cov,
-        s=s,
-        cmap=cmap,
-        vmin=vmin,
-        vmax=vmax,
-        alpha=0.95,
         s=s,
         cmap=cmap,
         vmin=vmin,
@@ -850,7 +825,6 @@ def plot_dexterity_pointcloud3d(
     P = pts[m]
     C = cov_pts[m]
 
-    # 可选降采样
     if P.shape[0] > max_points:
         idx = np.random.choice(P.shape[0], max_points, replace=False)
         P = P[idx]
