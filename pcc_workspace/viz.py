@@ -1,7 +1,16 @@
 from curses import meta
 from matplotlib.lines import Line2D
+from curses import meta
+from matplotlib.lines import Line2D
 import matplotlib.pyplot as plt
 import numpy as np
+from typing import Any, Optional, Sequence, Tuple, Union, Dict, List
+from .specs import IKSolution, TouchPointSpec
+from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+from .core import PCCFKSolver, PCCIKSolver  # for type hint only
+import numpy as np
+import math
+import cupy as cp
 from typing import Any, Optional, Sequence, Tuple, Union, Dict, List
 from .specs import IKSolution, TouchPointSpec
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
@@ -381,20 +390,25 @@ def compute_dexterity_heatmap2d(
     dy = (ymax - ymin) / Ny if Ny > 0 else 1.0
 
     # Cell indices (row-major with y the fast-varying in reshape below)
+    # Cell indices (row-major with y the fast-varying in reshape below)
     ix = np.floor((U - xmin) / dx).astype(int)
     iy = np.floor((V - ymin) / dy).astype(int)
     ix = np.clip(ix, 0, Nx - 1)
     iy = np.clip(iy, 0, Ny - 1)
+    cell_id = ix + Nx * iy
     cell_id = ix + Nx * iy
 
     # Orientation bin ids
     ori_ids, TOT = _orientation_bin_ids(D, orientation_bins[0], orientation_bins[1])
 
     # Unique (cell, orientation) pairs → coverage per cell
+    # Unique (cell, orientation) pairs → coverage per cell
     combo = cell_id.astype(np.int64) * np.int64(TOT) + ori_ids.astype(np.int64)
     uniq_combo = np.unique(combo)
     cells_from_combo = (uniq_combo // np.int64(TOT)).astype(int)
+    cells_from_combo = (uniq_combo // np.int64(TOT)).astype(int)
     unique_count = np.bincount(cells_from_combo, minlength=Nx * Ny)
+
 
     # Raw sample count per cell
     sample_count = np.bincount(cell_id, minlength=Nx * Ny)
@@ -405,10 +419,12 @@ def compute_dexterity_heatmap2d(
     C = sample_count.reshape(Ny, Nx).astype(int)
 
     # Under-sampled cells -> NaN
+    # Under-sampled cells -> NaN
     H[C < int(min_samples_per_cell)] = np.nan
     return H, (xmin, xmax, ymin, ymax), C
 
 
+# -------------------- 3D voxelized coverage --------------------
 # -------------------- 3D voxelized coverage --------------------
 def compute_dexterity_voxels3d(
     pts: np.ndarray,
@@ -424,6 +440,8 @@ def compute_dexterity_voxels3d(
       coverage: (M,) coverage in [0,1]
       counts: (M,) sample counts per voxel
 
+    Implementation aligns coverage/counts to the *unique* occupied voxels to avoid
+    length mismatches.
     Implementation aligns coverage/counts to the *unique* occupied voxels to avoid
     length mismatches.
     """
@@ -443,6 +461,7 @@ def compute_dexterity_voxels3d(
     nx = int(ix.max() + 1)
     ny = int(iy.max() + 1)
     nid = ix + nx * (iy + ny * iz)
+    nid = ix + nx * (iy + ny * iz)
     max_id = int(nid.max())
 
     # Orientation bins per sample
@@ -451,6 +470,7 @@ def compute_dexterity_voxels3d(
     )
 
     # Unique (voxel, orientation-bin)
+    # Unique (voxel, orientation-bin)
     combo = nid.astype(np.int64) * np.int64(TOT) + ori_ids.astype(np.int64)
     uniq_combo = np.unique(combo)
     vox_from_combo = (uniq_combo // np.int64(TOT)).astype(np.int64)
@@ -458,9 +478,12 @@ def compute_dexterity_voxels3d(
     unique_count_full = np.bincount(
         vox_from_combo, minlength=max_id + 1
     )  # bins per voxel
+    )  # bins per voxel
     sample_count_full = np.bincount(nid, minlength=max_id + 1)  # raw samples per voxel
     coverage_full = unique_count_full.astype(float) / float(TOT)
 
+    # Restrict to actually occupied voxels (stable order)
+    uniq_vox, first_idx = np.unique(nid, return_index=True)
     # Restrict to actually occupied voxels (stable order)
     uniq_vox, first_idx = np.unique(nid, return_index=True)
     vx_i = (uniq_vox % nx).astype(np.int64)
@@ -570,6 +593,94 @@ def plot_dexterity_heatmap2d(
 # -----------------------------------------------------------
 # 3D voxel scatter (uses your compute_dexterity_voxels3d)
 # -----------------------------------------------------------
+def plot_dexterity_heatmap2d(
+    pts: np.ndarray,
+    Ts: np.ndarray,
+    *,
+    slice_axis: str = "z",
+    slice_at: float = 0.0,
+    slice_thickness: float = 0.005,
+    grid_size: Tuple[int, int] = (200, 200),
+    orientation_bins: Tuple[int, int] = (36, 18),
+    min_samples_per_cell: int = 8,
+    title: str = "Dexterity heatmap",
+    show_colorbar: bool = True,
+    cmap: str = "viridis",
+    vmin: Optional[float] = 0.0,
+    vmax: Optional[float] = 1.0,
+    annotate_counts: bool = False,
+):
+    """
+    Render the 2D dexterity heatmap on an axis-aligned slice.
+
+    NOTE: requires `compute_dexterity_heatmap2d` to be available in scope.
+    """
+    H, extent, C = compute_dexterity_heatmap2d(
+        pts,
+        Ts,
+        slice_axis=slice_axis,
+        slice_at=slice_at,
+        slice_thickness=slice_thickness,
+        grid_size=grid_size,
+        orientation_bins=orientation_bins,
+        min_samples_per_cell=min_samples_per_cell,
+        extent=None,
+    )
+
+    fig = plt.figure(figsize=(8, 7))
+    ax = fig.add_subplot()
+
+    # mask NaNs for nicer rendering
+    Hm = np.ma.masked_invalid(H)
+    im = ax.imshow(
+        Hm,
+        origin="lower",
+        extent=extent,
+        aspect="equal",
+        cmap=cmap,
+        vmin=vmin,
+        vmax=vmax,
+        interpolation="nearest",
+    )
+
+    # axis labels based on slice axis
+    xlab = {"x": "Y (m)", "y": "X (m)", "z": "X (m)"}[slice_axis]
+    ylab = {"x": "Z (m)", "y": "Z (m)", "z": "Y (m)"}[slice_axis]
+    ax.set_xlabel(xlab)
+    ax.set_ylabel(ylab)
+    ax.set_title(title)
+
+    if show_colorbar:
+        cb = fig.colorbar(im, ax=ax, shrink=0.82, pad=0.02)
+        cb.set_label("Orientation coverage (0–1)")
+
+    if annotate_counts:
+        Ny, Nx = H.shape
+        xmin, xmax, ymin, ymax = extent
+        dx = (xmax - xmin) / Nx
+        dy = (ymax - ymin) / Ny
+        for iy in range(Ny):
+            for ix in range(Nx):
+                if not np.isnan(H[iy, ix]):
+                    ax.text(
+                        xmin + (ix + 0.5) * dx,
+                        ymin + (iy + 0.5) * dy,
+                        str(int(C[iy, ix])),
+                        color="w",
+                        ha="center",
+                        va="center",
+                        fontsize=6,
+                        alpha=0.8,
+                    )
+
+    plt.tight_layout()
+    plt.show()
+    return fig, ax, im
+
+
+# -----------------------------------------------------------
+# 3D voxel scatter (uses your compute_dexterity_voxels3d)
+# -----------------------------------------------------------
 def plot_dexterity_voxels3d(
     pts: np.ndarray,
     Ts: np.ndarray,
@@ -584,7 +695,14 @@ def plot_dexterity_voxels3d(
     vmin: Optional[float] = 0.0,
     vmax: Optional[float] = 1.0,
     size_by_count: bool = False,
+    cmap: str = "viridis",
+    vmin: Optional[float] = 0.0,
+    vmax: Optional[float] = 1.0,
+    size_by_count: bool = False,
 ):
+    """
+    Scatter plot of 3D voxel dexterity coverage.
+    """
     """
     Scatter plot of 3D voxel dexterity coverage.
     """
@@ -598,14 +716,24 @@ def plot_dexterity_voxels3d(
     if centers.shape[0] == 0:
         raise ValueError(
             "No voxels after filtering; enlarge `voxel` or lower `min_samples_per_voxel`."
+            "No voxels after filtering; enlarge `voxel` or lower `min_samples_per_voxel`."
         )
 
+    # decimation for big clouds
     # decimation for big clouds
     M = centers.shape[0]
     if M > max_points:
         idx = np.random.choice(M, max_points, replace=False)
         centers = centers[idx]
         cov = cov[idx]
+        cnt = cnt[idx]
+
+    # point size
+    if size_by_count:
+        s = 4.0 + 0.6 * (cnt - np.min(cnt)) / max(1, (np.max(cnt) - np.min(cnt)))
+        s = 10.0 * s
+    else:
+        s = 8.0
         cnt = cnt[idx]
 
     # point size
@@ -627,6 +755,11 @@ def plot_dexterity_voxels3d(
         vmin=vmin,
         vmax=vmax,
         alpha=0.95,
+        s=s,
+        cmap=cmap,
+        vmin=vmin,
+        vmax=vmax,
+        alpha=0.95,
         depthshade=False,
     )
     ax.set_xlabel("X (m)")
@@ -638,6 +771,222 @@ def plot_dexterity_voxels3d(
         cb.set_label("Orientation coverage (0–1)")
     plt.tight_layout()
     plt.show()
+    return fig, ax, sc
+
+
+# -----------------------------------------------------------
+# Convenience: plot multiple slices at once
+# -----------------------------------------------------------
+def compute_dexterity_pointcloud3d(
+    pts: np.ndarray,
+    Ts: np.ndarray,
+    *,
+    voxel: Union[float, Tuple[float, float, float]] = 0.01,
+    orientation_bins: Tuple[int, int] = (24, 12),
+    min_samples_per_voxel: int = 6,
+) -> np.ndarray:
+    if isinstance(voxel, (int, float)):
+        vx = vy = vz = float(voxel)
+    else:
+        vx, vy, vz = [float(x) for x in voxel]
+        if min(vx, vy, vz) <= 0:
+            raise ValueError("voxel sizes must be > 0")
+
+    base = pts.min(axis=0)
+    ix = np.floor((pts[:, 0] - base[0]) / vx).astype(np.int64)
+    iy = np.floor((pts[:, 1] - base[1]) / vy).astype(np.int64)
+    iz = np.floor((pts[:, 2] - base[2]) / vz).astype(np.int64)
+    nx = int(ix.max() + 1)
+    ny = int(iy.max() + 1)
+    nid = ix + nx * (iy + ny * iz)
+    max_id = int(nid.max())
+
+    ori_ids, TOT = _orientation_bin_ids(
+        Ts[:, :3, 2], orientation_bins[0], orientation_bins[1]
+    )
+
+    combo = nid.astype(np.int64) * np.int64(TOT) + ori_ids.astype(np.int64)
+    uniq_combo = np.unique(combo)
+    vox_from_combo = (uniq_combo // np.int64(TOT)).astype(np.int64)
+
+    unique_count_full = np.bincount(vox_from_combo, minlength=max_id + 1)
+    sample_count_full = np.bincount(nid, minlength=max_id + 1)
+    coverage_full = unique_count_full.astype(float) / float(TOT)
+
+    cov_pts = coverage_full[nid]
+    cov_pts[sample_count_full[nid] < int(min_samples_per_voxel)] = np.nan
+    return cov_pts
+
+
+def plot_dexterity_pointcloud3d(
+    pts: np.ndarray,
+    Ts: np.ndarray,
+    *,
+    voxel: Union[float, Tuple[float, float, float]] = 0.01,
+    orientation_bins: Tuple[int, int] = (24, 12),
+    min_samples_per_voxel: int = 6,
+    max_points: int = 100000,
+    cmap: str = "viridis",
+    vmin: Optional[float] = 0.0,
+    vmax: Optional[float] = 1.0,
+    point_size: float = 3.5,
+    alpha: float = 0.95,
+    title: str = "Dexterity point cloud (3D)",
+):
+
+    cov_pts = compute_dexterity_pointcloud3d(
+        pts,
+        Ts,
+        voxel=voxel,
+        orientation_bins=orientation_bins,
+        min_samples_per_voxel=min_samples_per_voxel,
+    )
+    m = ~np.isnan(cov_pts)
+    if not np.any(m):
+        raise ValueError(
+            "All points are under-sampled; relax min_samples_per_voxel or enlarge voxel."
+        )
+
+    P = pts[m]
+    C = cov_pts[m]
+
+    # 可选降采样
+    if P.shape[0] > max_points:
+        idx = np.random.choice(P.shape[0], max_points, replace=False)
+        P = P[idx]
+        C = C[idx]
+
+    fig = plt.figure(figsize=(9, 7))
+    ax = fig.add_subplot(projection="3d")
+    sc = ax.scatter(
+        P[:, 0],
+        P[:, 1],
+        P[:, 2],
+        c=C,
+        s=point_size,
+        cmap=cmap,
+        vmin=vmin,
+        vmax=vmax,
+        alpha=alpha,
+        depthshade=False,
+    )
+    ax.set_xlabel("X (m)")
+    ax.set_ylabel("Y (m)")
+    ax.set_zlabel("Z (m)")
+    ax.set_title(title)
+    cb = fig.colorbar(sc, ax=ax, shrink=0.75, pad=0.02)
+    cb.set_label("Orientation coverage (0–1)")
+    plt.tight_layout()
+    plt.show()
+    return fig, ax, sc
+
+
+# -------------------- 2D: per-sample dexterity (slice) --------------------
+def compute_dexterity_pointcloud2d(
+    pts: np.ndarray,
+    Ts: np.ndarray,
+    *,
+    slice_axis: str = "z",
+    slice_at: float = 0.0,
+    slice_thickness: float = 0.005,
+    grid_size: Tuple[int, int] = (200, 200),
+    orientation_bins: Tuple[int, int] = (36, 18),
+    min_samples_per_cell: int = 8,
+) -> Tuple[np.ndarray, np.ndarray]:
+
+    H, extent, counts = compute_dexterity_heatmap2d(
+        pts,
+        Ts,
+        slice_axis=slice_axis,
+        slice_at=slice_at,
+        slice_thickness=slice_thickness,
+        grid_size=grid_size,
+        orientation_bins=orientation_bins,
+        min_samples_per_cell=min_samples_per_cell,
+    )
+
+    ax_idx = {"x": 0, "y": 1, "z": 2}[slice_axis]
+    half = max(0.0, float(slice_thickness) * 0.5)
+    lo, hi = slice_at - half, slice_at + half
+    mask = (pts[:, ax_idx] >= lo) & (pts[:, ax_idx] <= hi)
+    P = pts[mask]
+
+    other = [i for i in range(3) if i != ax_idx]
+    U = P[:, other[0]]
+    V = P[:, other[1]]
+
+    xmin, xmax, ymin, ymax = extent
+    Nx, Ny = int(grid_size[0]), int(grid_size[1])
+    dx = (xmax - xmin) / Nx if Nx > 0 else 1.0
+    dy = (ymax - ymin) / Ny if Ny > 0 else 1.0
+
+    ix = np.clip(np.floor((U - xmin) / dx).astype(int), 0, Nx - 1)
+    iy = np.clip(np.floor((V - ymin) / dy).astype(int), 0, Ny - 1)
+
+    Cgrid = H[iy, ix]
+    ok = ~np.isnan(Cgrid)
+    P2 = np.stack([U[ok], V[ok]], axis=1)
+    return P2, Cgrid[ok]
+
+
+def plot_dexterity_pointcloud2d(
+    pts: np.ndarray,
+    Ts: np.ndarray,
+    *,
+    slice_axis: str = "z",
+    slice_at: float = 0.0,
+    slice_thickness: float = 0.005,
+    grid_size: Tuple[int, int] = (200, 200),
+    orientation_bins: Tuple[int, int] = (36, 18),
+    min_samples_per_cell: int = 8,
+    max_points: int = 150000,
+    cmap: str = "viridis",
+    vmin: Optional[float] = 0.0,
+    vmax: Optional[float] = 1.0,
+    point_size: float = 1.8,
+    alpha: float = 0.9,
+    title: str = "Dexterity point cloud (2D slice)",
+):
+
+    P2, C = compute_dexterity_pointcloud2d(
+        pts,
+        Ts,
+        slice_axis=slice_axis,
+        slice_at=slice_at,
+        slice_thickness=slice_thickness,
+        grid_size=grid_size,
+        orientation_bins=orientation_bins,
+        min_samples_per_cell=min_samples_per_cell,
+    )
+    if P2.shape[0] == 0:
+        raise ValueError("No valid points on slice; loosen thickness or sampling.")
+
+    if P2.shape[0] > max_points:
+        idx = np.random.choice(P2.shape[0], max_points, replace=False)
+        P2 = P2[idx]
+        C = C[idx]
+
+    fig = plt.figure(figsize=(8, 7))
+    ax = fig.add_subplot()
+    sc = ax.scatter(
+        P2[:, 0],
+        P2[:, 1],
+        c=C,
+        s=point_size,
+        cmap=cmap,
+        vmin=vmin,
+        vmax=vmax,
+        alpha=alpha,
+    )
+    ax.set_aspect("equal", adjustable="box")
+    ax.set_xlabel({"x": "Y (m)", "y": "X (m)", "z": "X (m)"}[slice_axis])
+    ax.set_ylabel({"x": "Z (m)", "y": "Z (m)", "z": "Y (m)"}[slice_axis])
+    ax.set_title(title)
+    cb = fig.colorbar(sc, ax=ax, shrink=0.82, pad=0.02)
+    cb.set_label("Orientation coverage (0–1)")
+    plt.tight_layout()
+    plt.show()
+    return fig, ax, sc
     return fig, ax, sc
 
 

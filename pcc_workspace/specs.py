@@ -2,7 +2,11 @@ from dataclasses import dataclass
 from typing import Literal, Optional, Union
 from typing import List, Dict, Any
 import numpy as np
+from typing import Literal, Optional, Union
+from typing import List, Dict, Any
+import numpy as np
 
+PhiCoupling = Optional[Union[str, float]]
 PhiCoupling = Optional[Union[str, float]]
 
 
@@ -21,10 +25,13 @@ class SegmentSpec:
     L_max: float
     samples_length: int = 1
     L_step: Optional[float] = None
+    L_step: Optional[float] = None
 
     passive_L_min: float = 0.0
     passive_L_max: float = 0.0
     samples_passive_length: int = 1
+    passive_L_step: Optional[float] = None
+    active_L_max: float = 0.006
     passive_L_step: Optional[float] = None
     active_L_max: float = 0.006
     theta_max: float = 0.0
