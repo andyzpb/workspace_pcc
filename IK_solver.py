@@ -1,11 +1,22 @@
 from pcc_workspace.specs import SegmentSpec, TranslationSpec, TouchPointSpec, IKOptions
-from pcc_workspace.core import PCCFKSolver, PCCIKSolver
 from pcc_workspace.core_ik_cf import PCCIKClosedForm
 from pcc_workspace.viz import visualize_touch_solutions_segmented
 from matplotlib import pyplot as plt
 import testcases as tc
 import numpy as np
+from time import time as _time
 
+class Timer:
+    """The basic timer."""
+
+    #: The raw function to get the CPU time.
+    clock = _time
+
+    def __call__(self):
+        return self.clock()
+
+    def run(self, profiler):
+        yield
 # --------------------------- Segment definitions ---------------------------
 
 # Outer tube: bendable = 0.05 m, keep total 1.0 -> passive = 0.95 m
@@ -51,7 +62,7 @@ inner = SegmentSpec(
 def main():
     tr = TranslationSpec(d_min=0.0, d_max=0.0, samples=1)
 
-    ws = PCCFKSolver([outer, inner], translation=tr, small_L_eps=1e-4)
+    # ws = PCCFKSolver([outer, inner], translation=tr, small_L_eps=1e-4)
 
     touch = tc.N01[1]
 
@@ -68,7 +79,8 @@ def main():
         active_first_tol=5e-4,
         nms_enable=True,
     )
-
+    time = Timer()
+    time.start = time()
     # IK solve (Closed-Form + 1D root on φ1)
     solver = PCCIKClosedForm([inner, outer], tr, opts)
     solver.debug = True
@@ -76,7 +88,8 @@ def main():
     solver.inner_rigid_tip = 0.003  # meters
     print(touch)
     solutions = solver.solve(touch)
-
+    time.end = time()
+    print(f"IK solve time: {time.end - time.start:.3f} seconds")
     if not solutions:
         print("Not reachable under current grid/tolerances.")
         return

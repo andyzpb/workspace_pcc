@@ -5,9 +5,7 @@ import numpy as np
 from typing import Any, Optional, Sequence, Tuple, Union, Dict, List
 from .specs import IKSolution, TouchPointSpec
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
-from .core import PCCFKSolver, PCCIKSolver  # for type hint only
 import math
-import cupy as cp
 
 def _voxel_downsample_indices(
     pts: np.ndarray,

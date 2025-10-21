@@ -2,7 +2,7 @@
 
 ## 0) Problem
 
-Given a target contact point \(P_\star\in\mathbb{R}^3\) and a target surface normal \(\hat{\boldsymbol n}_\star\in\mathbb{S}^2\), find a feasible configuration of a two-segment PCC robot (**outer**, **inner**) with **no roll actuation** and a **base feed** \(d\) along world \(+\hat{\boldsymbol z}\) (which affects position only), such that
+Given a target contact point \(P_\star\in\mathbb{R}^3\) and a target surface normal \(\hat{\boldsymbol n}_\star\in\mathbb{S}^2\), find a feasible configuration of a two-segment PCC robot (**outer**, **inner**) with  a **base feed** \(d\) along world \(+\hat{\boldsymbol z}\) (which affects position only), such that
 \[
 \|\,p_{\text{tip}}^{(d)}-P_\star\,\|\le \varepsilon_{\text{pos}},\qquad
 \angle(\boldsymbol b_{\text{world}},\,\hat{\boldsymbol n}_\star)\le \varepsilon_{\text{bevel}},
@@ -33,7 +33,7 @@ R(\phi,\theta)=\exp\!\big(\theta\,\widehat{\boldsymbol u(\phi)}\big)
 =R_z(\phi)\exp(\theta\widehat{e_y})R_z(-\phi)
 =\boxed{\,R_z(\phi)\,R_y(\theta)\,R_z(-\phi)\,}.
 \]
-The code also provides a Rodrigues axis–angle form (`_axis_angle_R`):
+And also a Rodrigues axis–angle form (`_axis_angle_R`):
 \[
 R = cI+(1-c)\,\boldsymbol u\boldsymbol u^\top + s\,\widehat{\boldsymbol u},\quad
 c=\cos\theta,\ s=\sin\theta.
@@ -48,7 +48,7 @@ In the local bending plane (axis \(e_y\)), a circular arc of radius \(r\) and an
 \]
 In world frame:
 \[
-\boxed{\ \boldsymbol p(\phi,\kappa,\theta)=R_z(\phi)\,\boldsymbol p_0\!\big(r=\tfrac1\kappa,\theta\big)\ }.
+\boxed{\ \boldsymbol p(\phi,\kappa,\theta)=R_z(\phi)\,\boldsymbol p_0\!\big            (r=\tfrac1\kappa,\theta\big)\ }.
 \]
 The implementation `_cc_transform(phi,kappa,theta)` handles \(\kappa\!\approx\!0\) or \(\theta\!\approx\!0\) via a **first-order consistent** straight-line limit:
 \[
@@ -62,7 +62,7 @@ Define
 \boldsymbol v(\theta,s)=\begin{bmatrix}s\,A(\theta)\\[2pt]0\\[2pt]s\,B(\theta)\end{bmatrix},\quad
 A(\theta)=\frac{1-\cos\theta}{\theta},\ \ B(\theta)=\frac{\sin\theta}{\theta}.
 \]
-Exact derivatives used in code:
+we can get derivatives such that:
 \[
 A'(\theta)=\frac{\theta\sin\theta-(1-\cos\theta)}{\theta^2},\qquad
 B'(\theta)=\frac{\theta\cos\theta-\sin\theta}{\theta^2}.
@@ -77,7 +77,7 @@ B'(\theta)&=-\tfrac13\theta+\tfrac1{30}\theta^3+\mathcal O(\theta^5).
 \end{aligned}
 \]
 
-### 1.4 Canonical angle representation (`_canon_theta_phi`)
+### 1.4 Canonical angle representation
 
 We enforce a canonical representation
 \[
@@ -96,7 +96,7 @@ Otherwise, compare geodesic distances to the arc endpoints, and snap to the near
 
 ---
 
-## 2) Hardware-faithful chain ordering
+## 2) Chain ordering
 
 - **Outer segment** (passive → active):
 \[
@@ -196,7 +196,7 @@ p_{\text{tip}}^{(d)}&=p + d\,e_z.
 
 ---
 
-## 6) Analytical Jacobians — full derivations
+## 6) Analytical Jacobians 
 
 We differentiate with respect to
 \[
@@ -254,7 +254,7 @@ With \(\boldsymbol b=R_1R_2\boldsymbol b_0\) (unit by construction),
 \frac{\partial \boldsymbol b}{\partial \theta_2}=R_1\,(\partial R_2/\partial\theta_2)\boldsymbol b_0,\quad
 \frac{\partial \boldsymbol b}{\partial \phi_2}  =R_1\,(\partial R_2/\partial\phi_2)\boldsymbol b_0.
 \]
-Derivatives w.r.t. \(s_2,L_{2p},d\) are \(\boldsymbol 0\). If the code normalises \(\boldsymbol b\), optionally project
+Derivatives w.r.t. \(s_2,L_{2p},d\) are \(\boldsymbol 0\). Project \(J_b\) as
 \[
 J_b\leftarrow(I-\boldsymbol b\boldsymbol b^\top)J_b
 \]
@@ -262,7 +262,7 @@ to the tangent space of \(\mathbb{S}^2\).
 
 ---
 
-## 7) Gauss–Newton / QP refinement (as implemented)
+## 7) Gauss–Newton / QP refinement
 
 Residuals:
 \[
