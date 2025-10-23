@@ -1,13 +1,13 @@
-from pcc_workspace.specs import SegmentSpec, TranslationSpec, TouchPointSpec, IKOptions
-from pcc_workspace.core_ik_cf import PCCIKClosedForm
-from pcc_workspace.viz import visualize_touch_solutions_segmented
+from pccik_native.pcc_workspace.specs import SegmentSpec, TranslationSpec, TouchPointSpec, IKOptions
+from pccik_native.pcc_workspace.viz import visualize_touch_solutions_segmented
+from IK_pipeline import create_solver
+
 from matplotlib import pyplot as plt
-import testcases as tc
+import pccik_native.testcases as tc
 import numpy as np
 from time import time as _time
 
 class Timer:
-    """The basic timer."""
 
     #: The raw function to get the CPU time.
     clock = _time
@@ -76,13 +76,13 @@ def main():
         angle_target_deg=45,
         enforce_axis_band=True,
         active_first=True,
-        active_first_tol=5e-4,
+        active_first_tol=2e-2,
         nms_enable=True,
     )
     time = Timer()
     time.start = time()
     # IK solve (Closed-Form + 1D root on φ1)
-    solver = PCCIKClosedForm([inner, outer], tr, opts)
+    solver = create_solver([inner, outer], tr, opts)
     solver.debug = True
 
     solver.inner_rigid_tip = 0.003  # meters

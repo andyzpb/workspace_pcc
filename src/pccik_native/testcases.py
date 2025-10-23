@@ -1,7 +1,7 @@
 import math
 import numpy as np
 from typing import Tuple, List
-from pcc_workspace.specs import TouchPointSpec
+from pccik_native.pcc_workspace.specs import TouchPointSpec
 
 def _rotz(a: float) -> np.ndarray:
     c, s = float(np.cos(a)), float(np.sin(a))
@@ -77,9 +77,9 @@ L_RIGID   = 0.003         # inner rigid tip 3 mm
 
 
 _BASE_CASES = [
-    #   θ1,  φ1,   θ2,  φ2,   L2a,    L2p,   name
+    #   θ1,  φ1,   θ2,  φ2,   s2,    L2p,   name
     # NOTE: 1 ≤ θ2/θ2 =0 or no solution
-    (+1, 60, +1, 46, 0.006, 0.002, "N01"),
+    (+50, 25, +30, 80, 0.006, 0.002, "N01"),
     (-10.0,  30.0, +22.0,  60.0, 0.006, 0.001, "N02"),
     (+14.0,  60.0, +24.0, 120.0, 0.006, 0.003, "N03"),
     (-12.0,  90.0, +20.0, 180.0, 0.005, 0.004, "N04"),

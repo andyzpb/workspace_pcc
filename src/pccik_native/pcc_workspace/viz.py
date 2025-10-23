@@ -1562,7 +1562,7 @@ def _fk_outer_end_from_solution(sol: "IKSolution") -> np.ndarray:
             T = T @ Ti
     return T
 def _format_mm(x: float) -> str:
-    return f"{x*1e3:.3f} mm"
+    return f"{x*1e3:.2f} mm"
 
 def _get_inner_outer_indices(sol: "IKSolution") -> Tuple[int, int]:
     names = [s.name.lower() for s in sol.segments]
