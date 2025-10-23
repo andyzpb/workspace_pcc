@@ -1,8 +1,8 @@
 import numpy as np
-from pcc_workspace.core import PCCFKSolver as ws
-from pcc_workspace.specs import SegmentSpec as ss, TranslationSpec as ts
-import pcc_workspace.viz as viz
-from pcc_workspace.volume_sampling import sample_volume_random_balanced
+from pccik_native.pcc_workspace.core import PCCFKSolver as ws
+from pccik_native.pcc_workspace.specs import SegmentSpec as ss, TranslationSpec as ts
+import pccik_native.pcc_workspace.viz as viz
+from pccik_native.pcc_workspace.volume_sampling import sample_volume_random_balanced
 
 
 def volumetric_spec() -> ws:

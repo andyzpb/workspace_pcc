@@ -17,9 +17,8 @@ from pccik_native.pcc_workspace.specs import (
 
 
 from pccik_native import _core as _native
-_HAVE_NATIVE = True
-print("[INFO] Using native PCCIK implementation.")
 
+_HAVE_NATIVE = True
 
 
 class PCCIKClosedFormFast(PCCIKClosedForm):
