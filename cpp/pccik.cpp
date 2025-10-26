@@ -153,7 +153,6 @@ namespace detail
             return;
         }
 
-        // 半角公式区间：避免 (1 - cos) 的消元误差
         T s, c;
         fast_sincos(T(0.5) * t, s, c);
         const T s2 = s * s;
