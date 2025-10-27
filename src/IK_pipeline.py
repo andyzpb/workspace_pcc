@@ -22,6 +22,30 @@ _HAVE_NATIVE = True
 
 
 class PCCIKClosedFormFast(PCCIKClosedForm):
+    def __init__(
+        self,
+        *args,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        self._seg1b = None
+        self._seg2b = None
+        self._consts = None
+
+    @staticmethod
+    def _as_c_float64(a: np.ndarray) -> np.ndarray:
+        return np.asarray(a, dtype=np.float64, order="C")
+
+    def _native_objs(self):
+        if not _HAVE_NATIVE:
+            return None, None, None
+        if self._seg1b is None:
+            self._seg1b = self._to_native_seg(self.seg1, outer=True)
+        if self._seg2b is None:
+            self._seg2b = self._to_native_seg(self.seg2, outer=False)
+        if self._consts is None:
+            self._consts = self._to_native_consts()
+        return self._seg1b, self._seg2b, self._consts
 
     def _to_native_seg(self, seg: SegmentSpec, outer: bool):
         if not _HAVE_NATIVE:
@@ -70,14 +94,12 @@ class PCCIKClosedFormFast(PCCIKClosedForm):
     ) -> Optional[Dict[str, Any]]:
         if not _HAVE_NATIVE or not hasattr(_native, "evaluate_once"):
             return None
-        seg1b = self._to_native_seg(self.seg1, outer=True)
-        seg2b = self._to_native_seg(self.seg2, outer=False)
-        consts = self._to_native_consts()
+        seg1b, seg2b, consts = self._native_objs()
         out = _native.evaluate_once(
             float(theta1),
             float(phi1),
-            np.asarray(P_star, dtype=float),
-            np.asarray(n_star, dtype=float),
+            self._as_c_float64(P_star),
+            self._as_c_float64(n_star),
             seg1b,
             seg2b,
             consts,
@@ -98,32 +120,29 @@ class PCCIKClosedFormFast(PCCIKClosedForm):
                 theta1, P_star, n_star, phi_list, k_keep
             )
 
-        seg1b = self._to_native_seg(self.seg1, outer=True)
-        seg2b = self._to_native_seg(self.seg2, outer=False)
-        consts = self._to_native_consts()
+        seg1b, seg2b, consts = self._native_objs()
 
         res = _native.phi_scan(
             float(theta1),
-            np.asarray(phi_list, dtype=float),
-            np.asarray(P_star, dtype=float),
-            np.asarray(n_star, dtype=float),
+            self._as_c_float64(phi_list),
+            self._as_c_float64(P_star),
+            self._as_c_float64(n_star),
             seg1b,
             seg2b,
             consts,
             int(k_keep),
         )
 
-        out: List[Tuple[float, Dict[str, Any]]] = []
+        tmp: List[Tuple[float, Dict[str, Any]]] = []
         for d in res:
-            th1 = float(d["theta1"])
-            ph1 = float(d["phi1"])
             pos_err = float(d["pos_err"])
             ang_err = float(d["ang_err_deg"])
             J = pos_err + 1e-3 * ang_err
+
             seg0 = SegmentSolution(
                 name=self.seg1.name,
-                theta=th1,
-                phi=ph1,
+                theta=float(d["theta1"]),
+                phi=float(d["phi1"]),
                 L_total=float(self._s1 + self._L1p),
                 L_passive=float(self._L1p),
                 L_active=float(self._s1),
@@ -135,10 +154,10 @@ class PCCIKClosedFormFast(PCCIKClosedForm):
                 abs_d=float(d["abs_d"]),
                 segments=[seg0],
             )
-            out.append((J, cand))
+            tmp.append((J, cand))
 
-        out.sort(key=lambda t: t[0])
-        return out[:k_keep]
+        tmp.sort(key=lambda t: t[0])
+        return tmp
 
     def _refine_phi1_local(
         self,
@@ -154,24 +173,37 @@ class PCCIKClosedFormFast(PCCIKClosedForm):
                 theta1, phi_seed, P_star, n_star, halfspan_deg, maxiter
             )
 
-        seg1b = self._to_native_seg(self.seg1, outer=True)
-        seg2b = self._to_native_seg(self.seg2, outer=False)
-        consts = self._to_native_consts()
+        seg1b, seg2b, consts = self._native_objs()
         out = _native.brent_refine_phi(
             float(theta1),
             float(phi_seed),
             float(halfspan_deg),
             int(maxiter),
-            np.asarray(P_star, float),
-            np.asarray(n_star, float),
+            self._as_c_float64(P_star),
+            self._as_c_float64(n_star),
             seg1b,
             seg2b,
             consts,
         )
         if out is None:
             return float(phi_seed), None
+
         phi_best = float(out["phi1"])
-        cand_best = self._evaluate_once(theta1, phi_best, P_star, n_star)
+        seg0 = SegmentSolution(
+            name=self.seg1.name,
+            theta=float(out["theta1"]) if "theta1" in out else float(theta1),
+            phi=float(out["phi1_eval"]) if "phi1_eval" in out else float(phi_best),
+            L_total=float(self._s1 + self._L1p),
+            L_passive=float(self._L1p),
+            L_active=float(self._s1),
+        )
+        cand_best = dict(
+            pos_err=float(out["pos_err"]),
+            ang_err_deg=float(out["ang_err_deg"]),
+            translation=float(out["translation"]),
+            abs_d=float(out["abs_d"]),
+            segments=[seg0],
+        )
         return phi_best, cand_best
 
     def _lm_polish(

@@ -1,4 +1,9 @@
-from pccik_native.pcc_workspace.specs import SegmentSpec, TranslationSpec, TouchPointSpec, IKOptions
+from pccik_native.pcc_workspace.specs import (
+    SegmentSpec,
+    TranslationSpec,
+    TouchPointSpec,
+    IKOptions,
+)
 from pccik_native.pcc_workspace.viz import visualize_touch_solutions_segmented
 from IK_pipeline import create_solver
 
@@ -6,6 +11,13 @@ from matplotlib import pyplot as plt
 import pccik_native.testcases as tc
 import numpy as np
 from time import time as _time
+import os
+
+try:
+    os.nice(-20)
+except:
+    pass
+
 
 class Timer:
 
@@ -17,6 +29,8 @@ class Timer:
 
     def run(self, profiler):
         yield
+
+
 # --------------------------- Segment definitions ---------------------------
 
 # Outer tube: bendable = 0.05 m, keep total 1.0 -> passive = 0.95 m
@@ -80,16 +94,16 @@ def main():
         nms_enable=True,
     )
     time = Timer()
-    time.start = time()
     # IK solve (Closed-Form + 1D root on φ1)
     solver = create_solver([inner, outer], tr, opts)
-    solver.debug = True
+    solver.debug = False
 
     solver.inner_rigid_tip = 0.003  # meters
     print(touch)
+    t0 = Timer()()
     solutions = solver.solve(touch)
-    time.end = time()
-    print(f"IK solve time: {time.end - time.start:.3f} seconds")
+    t1 = Timer()()
+    print(f"IK solve time: {(t1 - t0)*1e3:.3f} ms")
     if not solutions:
         print("Not reachable under current grid/tolerances.")
         return
