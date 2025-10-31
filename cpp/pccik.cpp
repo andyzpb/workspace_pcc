@@ -140,7 +140,7 @@ PCC_ALWAYS_INLINE void A_B_scalar_stable_ab(T t, T &A, T &B) noexcept {
   // small threshold: 8 * cbrt(eps)
   const T small = T(8) * std::cbrt(eps_v<T>);
 
-  if (at < small) [[likely]] {
+  if (at < small) [[unlikely]] {
     const T t2 = t * t;
     const T t3 = t2 * t;
     const T t4 = t2 * t2;
@@ -177,7 +177,7 @@ PCC_ALWAYS_INLINE void A_B_scalar_stable(T t, T &A, T &B, T &Ap,
   const T at = std::abs(t);
   const T small = T(8) * std::cbrt(eps_v<T>);
 
-  if (at < small) [[likely]] {
+  if (at < small) [[unlikely]] {
     const T t2 = t * t;
     const T t3 = t2 * t;
     const T t4 = t2 * t2;

@@ -12,7 +12,7 @@ import pccik_native.testcases as tc
 import numpy as np
 from time import time as _time
 import os
-
+import gc
 try:
     os.nice(-20)
 except:
@@ -141,4 +141,6 @@ def main():
 
 
 if __name__ == "__main__":
+    gc.disable()
     main()
+    gc.enable()

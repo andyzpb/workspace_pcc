@@ -166,7 +166,7 @@ class PCCIKClosedFormFast(PCCIKClosedForm):
         P_star: np.ndarray,
         n_star: np.ndarray,
         halfspan_deg: float = 6.0,
-        maxiter: int = 60,
+        maxiter: int = 24,
     ):
         if not _HAVE_NATIVE or not hasattr(_native, "brent_refine_phi"):
             return super()._refine_phi1_local(
@@ -212,7 +212,7 @@ class PCCIKClosedFormFast(PCCIKClosedForm):
         phi1: float,
         P_star: np.ndarray,
         n_star: np.ndarray,
-        iters: int = 8,
+        iters: int = 3,
     ):
         if not _HAVE_NATIVE or not hasattr(_native, "lm_polish"):
             return super()._lm_polish(theta1, phi1, P_star, n_star, iters)
@@ -241,10 +241,10 @@ class PCCIKClosedFormFast(PCCIKClosedForm):
         n_star: np.ndarray,
         th_lo: float,
         th_hi: float,
-        coarse_n: int = 41,
-        keep_top: int = 6,
+        coarse_n: int = 33,
+        keep_top: int = 4,
         refine_halfspan_deg: float = 5.0,
-        refine_n: int = 19,
+        refine_n: int = 11,
     ) -> list[float]:
         if not _HAVE_NATIVE:
             return super()._theta1_candidates(
@@ -262,7 +262,7 @@ class PCCIKClosedFormFast(PCCIKClosedForm):
         seg2b = self._to_native_seg(self.seg2, outer=False)
         consts = self._to_native_consts()
 
-        phi_grid = np.linspace(-math.pi, math.pi, 48, endpoint=False, dtype=float)
+        phi_grid = np.linspace(-math.pi, math.pi, 24, endpoint=False, dtype=float)
 
         def score(theta1: float) -> float:
             res = _native.phi_scan(

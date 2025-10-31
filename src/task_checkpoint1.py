@@ -302,10 +302,7 @@ def plot_elegant(
     cloud_size: float = 4.0,
     cloud_alpha: float = 0.35,
 ):
-    """
-    优雅视图（骨架 + 目标 + 可选工作空间点云叠加）。
-    依赖外部工具函数: style_axes, draw_equal_xyz, draw_axes_triad, _cc_centerline_points
-    """
+
     P = np.array(touch.coordinates, float)
     n = np.array(touch.normal, float)
 
