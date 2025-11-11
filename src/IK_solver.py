@@ -95,7 +95,7 @@ def main():
     )
     time = Timer()
     # IK solve (Closed-Form + 1D root on φ1)
-    solver = create_solver([inner, outer], tr, opts)
+    solver = create_solver([outer, inner], tr, opts)
     solver.debug = False
 
     solver.inner_rigid_tip = 0.003  # meters

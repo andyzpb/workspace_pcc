@@ -1,12 +1,10 @@
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
-
 #if defined(__APPLE__)
-#include <math.h> // for __sincos / __sincosf on macOS
+#include <math.h>
 #include <pthread.h>
 #endif
-
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -18,17 +16,12 @@
 
 namespace py = pybind11;
 
-#if defined(USE_OPENMP)
-#include <omp.h>
-#endif
-
 #ifndef PCC_REAL
-#define PCC_REAL float // or float
+#define PCC_REAL double
 #endif
-
 using Real = PCC_REAL;
 
-static inline void pcc_set_thread_qos_interactive() noexcept {
+static inline void set_thread_qos_interactive() noexcept {
 #if defined(__APPLE__)
   pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
 #endif
@@ -38,1161 +31,550 @@ static inline void pcc_set_thread_qos_interactive() noexcept {
 #define PCC_ALWAYS_INLINE inline __attribute__((always_inline))
 #define PCC_HOT __attribute__((hot))
 #define PCC_COLD __attribute__((cold))
-#define PCC_UNREACHABLE __builtin_unreachable()
-#define PCC_ASSUME(cond)                                                       \
-  do {                                                                         \
-    if (!(cond))                                                               \
-      __builtin_unreachable();                                                 \
-  } while (0)
 #define PCC_FLATTEN __attribute__((flatten))
 #else
 #define PCC_ALWAYS_INLINE inline
 #define PCC_HOT
 #define PCC_COLD
-#define PCC_UNREACHABLE __assume(0)
-#define PCC_ASSUME(cond) __assume(cond)
 #define PCC_FLATTEN
 #endif
 
 namespace detail {
-
 template <class T> constexpr T sqr(T x) noexcept { return x * x; }
-
 template <class T> inline constexpr T two_pi_v = T(2) * std::numbers::pi_v<T>;
-
-template <class T> inline constexpr T one_over_two = T(0.5);
-
 template <class T> inline constexpr T eps_v = std::numeric_limits<T>::epsilon();
-
+template <class T> PCC_ALWAYS_INLINE T fmadd(const T&a,const T&b,const T&c){
+  if constexpr (std::is_arithmetic_v<T>) return std::fma(a,b,c);
+  else return a*b + c;
+}
 template <class T>
 PCC_ALWAYS_INLINE void fast_sincos(T a, T &s, T &c) noexcept {
 #if (defined(__GNUC__) || defined(__clang__))
 #if defined(__APPLE__)
-  if constexpr (std::is_same_v<T, double>) {
-    ::__sincos(a, &s, &c);
-    return;
-  }
-  if constexpr (std::is_same_v<T, float>) {
-    ::__sincosf(a, &s, &c);
-    return;
-  }
+  if constexpr (std::is_same_v<T, double>) { ::__sincos(a, &s, &c); return; }
+  if constexpr (std::is_same_v<T, float>)  { ::__sincosf(a, &s, &c); return; }
 #else
-  if constexpr (std::is_same_v<T, double>) {
-    ::sincos(a, &s, &c);
-    return;
-  }
-  if constexpr (std::is_same_v<T, float>) {
-    ::sincosf(a, &s, &c);
-    return;
-  }
+  if constexpr (std::is_same_v<T, double>) { ::sincos(a, &s, &c); return; }
+  if constexpr (std::is_same_v<T, float>)  { ::sincosf(a, &s, &c); return; }
 #endif
 #endif
-  s = std::sin(a);
-  c = std::cos(a);
+  using std::sin; using std::cos;
+  s = sin(a); c = cos(a);
 }
-
-// Wrap angle into [0, 2π)
 template <class T> PCC_ALWAYS_INLINE T wrap_0_2pi(T a) noexcept {
-  const T twopi = two_pi_v<T>;
-  const T inv_twopi = T(1) / twopi;
-  T t = a - std::floor(a * inv_twopi) * twopi;
-  if (t < T(0))
-    t += twopi;
-  if (t >= twopi)
-    t -= twopi;
+  const T twopi = two_pi_v<T>, inv = T(1) / twopi;
+  T t = a - std::floor(a * inv) * twopi;
+  if (t < T(0)) t += twopi;
+  if (t >= twopi) t -= twopi;
   return t;
 }
-
-// Project phi into interval [lo, hi] on the circle with minimal displacement
 template <class T>
 PCC_ALWAYS_INLINE T project_angle_to_interval(T phi, T lo, T hi) noexcept {
-  lo = wrap_0_2pi(lo);
-  hi = wrap_0_2pi(hi);
+  lo = wrap_0_2pi(lo); hi = wrap_0_2pi(hi);
   const T twopi = two_pi_v<T>;
   const T span = std::fmod(hi - lo + twopi, twopi);
-  if (span >= twopi - T(1e-12))
-    return wrap_0_2pi(phi);
-
+  if (span >= twopi - T(1e-12)) return wrap_0_2pi(phi);
   T x = std::fmod(wrap_0_2pi(phi) - lo + twopi, twopi);
-  if (x <= span)
-    return lo + x;
-
+  if (x <= span) return lo + x;
   const T to_lo = std::fmod(twopi - x, twopi);
   const T to_hi = std::fmod(x - span, twopi);
   return (to_hi <= to_lo) ? hi : lo;
 }
-
-// Safe clamp to box with tolerance; returns false if "far out"
 template <class T>
 PCC_ALWAYS_INLINE bool snap_to_box(T &x, T lo, T hi, T tol) noexcept {
-  if (x < lo - tol || x > hi + tol)
-    return false;
-  if (x < lo)
-    x = lo;
-  if (x > hi)
-    x = hi;
+  if (x < lo - tol || x > hi + tol) return false;
+  if (x < lo) x = lo;
+  if (x > hi) x = hi;
   return true;
 }
-
 template <class T>
 PCC_ALWAYS_INLINE void A_B_scalar_stable_ab(T t, T &A, T &B) noexcept {
   const T at = std::abs(t);
-  // small threshold: 8 * cbrt(eps)
   const T small = T(8) * std::cbrt(eps_v<T>);
-
-  if (at < small) [[unlikely]] {
-    const T t2 = t * t;
-    const T t3 = t2 * t;
-    const T t4 = t2 * t2;
-    const T t5 = t4 * t;
-    const T t6 = t3 * t3;
-    const T t7 = t6 * t;
-    const T t8 = t4 * t4;
-
-    // A ≈ t/2 - t^3/24 + t^5/720 - t^7/40320
-    A = std::fma(
-        T(-1.0 / 40320.0), t7,
-        std::fma(T(1.0 / 720.0), t5, std::fma(T(-1.0 / 24.0), t3, T(0.5) * t)));
-
-    // B ≈ 1 - t^2/6 + t^4/120 - t^6/5040 + t^8/362880
-    B = std::fma(T(1.0 / 362880.0), t8,
-                 std::fma(T(-1.0 / 5040.0), t6,
-                          std::fma(T(1.0 / 120.0), t4,
-                                   std::fma(T(-1.0 / 6.0), t2, T(1)))));
+  if (at < small) {
+    const T t2=t*t, t3=t2*t, t4=t2*t2, t5=t4*t, t6=t3*t3, t7=t6*t, t8=t4*t4;
+    A = std::fma(T(-1.0/40320.0),t7,std::fma(T(1.0/720.0),t5,std::fma(T(-1.0/24.0),t3,T(0.5)*t)));
+    B = std::fma(T(1.0/362880.0),t8,std::fma(T(-1.0/5040.0),t6,std::fma(T(1.0/120.0),t4,std::fma(T(-1.0/6.0),t2,T(1)))));
     return;
   }
-
-  T s, c;
-  fast_sincos(T(0.5) * t, s, c);
-  const T s2 = s * s;
-  // A = 2 s^2 / t
-  A = (T(2) * s2) / t;
-  // B = 2 s c / t
-  B = (T(2) * s * c) / t;
+  T s,c; fast_sincos(T(0.5)*t, s, c);
+  const T s2 = s*s;
+  A = (T(2)*s2)/t;
+  B = (T(2)*s*c)/t;
 }
-
 template <class T>
-PCC_ALWAYS_INLINE void A_B_scalar_stable(T t, T &A, T &B, T &Ap,
-                                         T &Bp) noexcept {
+PCC_ALWAYS_INLINE void A_B_scalar_stable_full(T t, T &A, T &B, T &Ap, T &Bp) noexcept {
   const T at = std::abs(t);
   const T small = T(8) * std::cbrt(eps_v<T>);
-
-  if (at < small) [[unlikely]] {
-    const T t2 = t * t;
-    const T t3 = t2 * t;
-    const T t4 = t2 * t2;
-    const T t5 = t4 * t;
-    const T t6 = t3 * t3;
-    const T t7 = t6 * t;
-    const T t8 = t4 * t4;
-
-    A = std::fma(
-        T(-1.0 / 40320.0), t7,
-        std::fma(T(1.0 / 720.0), t5, std::fma(T(-1.0 / 24.0), t3, T(0.5) * t)));
-    B = std::fma(T(1.0 / 362880.0), t8,
-                 std::fma(T(-1.0 / 5040.0), t6,
-                          std::fma(T(1.0 / 120.0), t4,
-                                   std::fma(T(-1.0 / 6.0), t2, T(1)))));
-
-    Ap = std::fma(
-        T(-1.0 / 5760.0), t6,
-        std::fma(T(1.0 / 144.0), t4, std::fma(T(-1.0 / 8.0), t2, T(0.5))));
-    Bp = std::fma(T(1.0 / 45360.0), t7,
-                  std::fma(T(-1.0 / 840.0), t5,
-                           std::fma(T(1.0 / 30.0), t3, T(-1.0 / 3.0) * t)));
+  if (at < small) {
+    const T t2=t*t, t3=t2*t, t4=t2*t2, t5=t4*t, t6=t3*t3, t7=t6*t, t8=t4*t4;
+    A  = std::fma(T(-1.0/40320.0),t7,std::fma(T(1.0/720.0),t5,std::fma(T(-1.0/24.0),t3,T(0.5)*t)));
+    B  = std::fma(T(1.0/362880.0),t8,std::fma(T(-1.0/5040.0),t6,std::fma(T(1.0/120.0),t4,std::fma(T(-1.0/6.0),t2,T(1)))));
+    Ap = std::fma(T(-1.0/5760.0), t6,std::fma(T(1.0/144.0), t4,std::fma(T(-1.0/8.0), t2,T(0.5))));
+    Bp = std::fma(T(1.0/45360.0), t7,std::fma(T(-1.0/840.0), t5,std::fma(T(1.0/30.0), t3,T(-1.0/3.0)*t)));
     return;
   }
-
-  T s, c;
-  fast_sincos(T(0.5) * t, s, c);
-
-  const T s2 = s * s;
-  A = (T(2) * s2) / t;
-  B = (T(2) * s * c) / t;
-
-  const T t2 = t * t;
-  const T c2_minus_s2 = c * c - s2;
-  Ap = (T(2) * s * c * t - T(2) * s2) / t2;
-  Bp = (t * c2_minus_s2 - T(2) * s * c) / t2;
+  T s,c; fast_sincos(T(0.5)*t, s, c);
+  const T s2 = s*s, t2=t*t, c2_minus_s2 = c*c - s2;
+  A  = (T(2)*s2)/t;
+  B  = (T(2)*s*c)/t;
+  Ap = (T(2)*s*c*t - T(2)*s2) / t2;
+  Bp = (t * c2_minus_s2 - T(2)*s*c) / t2;
+}
 }
 
-} // namespace detail
+template<class T> struct Dual2{
+  T v, d0, d1;
+  Dual2()=default;
+  Dual2(T v_):v(v_),d0(0),d1(0){}
+  Dual2(T v_,T a,T b):v(v_),d0(a),d1(b){}
+};
+template<class T> PCC_ALWAYS_INLINE Dual2<T> operator+(const Dual2<T>&a,const Dual2<T>&b){return {a.v+b.v,a.d0+b.d0,a.d1+b.d1};}
+template<class T> PCC_ALWAYS_INLINE Dual2<T> operator-(const Dual2<T>&a,const Dual2<T>&b){return {a.v-b.v,a.d0-b.d0,a.d1-b.d1};}
+template<class T> PCC_ALWAYS_INLINE Dual2<T> operator*(const Dual2<T>&a,const Dual2<T>&b){return {a.v*b.v,a.d0*b.v+a.v*b.d0,a.d1*b.v+a.v*b.d1};}
+template<class T> PCC_ALWAYS_INLINE Dual2<T> operator/(const Dual2<T>&a,const Dual2<T>&b){T inv=1/b.v;T v=a.v*inv;T t=inv*inv;return {v,(a.d0*b.v-a.v*b.d0)*t,(a.d1*b.v-a.v*b.d1)*t};}
+template<class T> PCC_ALWAYS_INLINE Dual2<T> operator-(const Dual2<T>&a){return {T(-1)*a.v,T(-1)*a.d0,T(-1)*a.d1};}
+template<class T> PCC_ALWAYS_INLINE Dual2<T> fma(const Dual2<T>&x,const Dual2<T>&y,const Dual2<T>&z){return x*y+z;}
+template<class T> PCC_ALWAYS_INLINE Dual2<T> sin(const Dual2<T>&a){T sv=std::sin(a.v), cv=std::cos(a.v); return {sv,cv*a.d0,cv*a.d1};}
+template<class T> PCC_ALWAYS_INLINE Dual2<T> cos(const Dual2<T>&a){T cv=std::cos(a.v), sv=std::sin(a.v); return {cv,-sv*a.d0,-sv*a.d1};}
+template<class T> PCC_ALWAYS_INLINE void fast_sincos(const Dual2<T>&a, Dual2<T>&s, Dual2<T>&c){s=sin(a); c=cos(a);}
+template<class T> PCC_ALWAYS_INLINE Dual2<T> sqrt(const Dual2<T>&a){T r=std::sqrt(a.v); T inv= (r>0)? (T(0.5)/r):T(0); return {r, a.d0*inv, a.d1*inv};}
+template<class T> PCC_ALWAYS_INLINE Dual2<T> atan2(const Dual2<T>&y,const Dual2<T>&x){T den = x.v*x.v + y.v*y.v; T v=std::atan2(y.v,x.v); T g0=(x.v*y.d0 - y.v*x.d0)/den; T g1=(x.v*y.d1 - y.v*x.d1)/den; return {v,g0,g1};}
+template<class T> PCC_ALWAYS_INLINE Dual2<T> hypot(const Dual2<T>&x,const Dual2<T>&y){return sqrt(Dual2<T>(x.v*x.v + y.v*y.v, 2*x.v*x.d0 + 2*y.v*y.d0, 2*x.v*x.d1 + 2*y.v*y.d1));}
+template<class T> PCC_ALWAYS_INLINE Dual2<T> abs(const Dual2<T>&a){return {std::abs(a.v), (a.v>=0? a.d0 : -a.d0), (a.v>=0? a.d1 : -a.d1)};}
+template<class S> PCC_ALWAYS_INLINE Real valof(const S& x){ if constexpr (std::is_arithmetic_v<S>) return static_cast<Real>(x); else return x.v; }
+template<class S> PCC_ALWAYS_INLINE S wrap0_any(const S& a){ if constexpr (std::is_arithmetic_v<S>) return detail::wrap_0_2pi(a); else return S(detail::wrap_0_2pi(a.v), a.d0, a.d1); }
+template<class U> PCC_ALWAYS_INLINE void fsincos(const U& a, U& s, U& c){ if constexpr (std::is_arithmetic_v<U>) detail::fast_sincos(a,s,c); else ::fast_sincos(a,s,c); }
+template<class T> PCC_ALWAYS_INLINE T clamp_scalar(T x, T lo, T hi){ if (x<lo) x=lo; if (x>hi) x=hi; return x; }
+template<class S> PCC_ALWAYS_INLINE S clamp_any(const S& x, Real lo, Real hi){ if constexpr (std::is_arithmetic_v<S>) return clamp_scalar<S>(x, S(lo), S(hi)); else return (x.v<=lo)? S(lo,0,0) : (x.v>=hi)? S(hi,0,0) : x; }
 
-// ------------------------------ linear algebra
-// -------------------------------------------
-template <class T> struct [[nodiscard]] Vec3 {
-  T x, y, z;
-
-  PCC_ALWAYS_INLINE T dot(const Vec3 &o) const noexcept {
-    return std::fma(x, o.x, std::fma(y, o.y, z * o.z));
-  }
+template <class T> struct Vec3{
+  T x,y,z;
+  PCC_ALWAYS_INLINE Vec3 operator+(const Vec3&o) const noexcept { return {x+o.x,y+o.y,z+o.z}; }
+  PCC_ALWAYS_INLINE Vec3 operator-(const Vec3&o) const noexcept { return {x-o.x,y-o.y,z-o.z}; }
+  PCC_ALWAYS_INLINE Vec3 operator*(T s) const noexcept { return {x*s,y*s,z*s}; }
+  PCC_ALWAYS_INLINE T dot(const Vec3&o) const noexcept { return detail::fmadd(x,o.x, detail::fmadd(y,o.y, z*o.z)); }
   PCC_ALWAYS_INLINE T norm2() const noexcept { return dot(*this); }
-  PCC_ALWAYS_INLINE T norm() const noexcept { return std::sqrt(norm2()); }
-
-  PCC_ALWAYS_INLINE Vec3 normalized(T eps = T(1e-12)) const noexcept {
-    const T n = norm();
-    if (n > eps) {
-      const T inv = T(1) / n;
-      return {x * inv, y * inv, z * inv};
-    }
-    return {T(0), T(0), T(0)};
-  }
-
-  PCC_ALWAYS_INLINE Vec3 operator+(const Vec3 &o) const noexcept {
-    return {x + o.x, y + o.y, z + o.z};
-  }
-  PCC_ALWAYS_INLINE Vec3 operator-(const Vec3 &o) const noexcept {
-    return {x - o.x, y - o.y, z - o.z};
-  }
-  PCC_ALWAYS_INLINE Vec3 operator*(T s) const noexcept {
-    return {x * s, y * s, z * s};
+  PCC_ALWAYS_INLINE T norm() const noexcept { using std::sqrt; return sqrt(norm2()); }
+  PCC_ALWAYS_INLINE Vec3 normalized(T eps=T(1e-12)) const noexcept {
+    const T n=norm(); if(valof(n)>valof(eps)){T inv=T(1)/n;return {x*inv,y*inv,z*inv};}
+    return {T(0),T(0),T(0)};
   }
 };
 
-template <class T> struct [[nodiscard]] Mat3 {
-  T a00, a01, a02, a10, a11, a12, a20, a21, a22;
-
-  PCC_ALWAYS_INLINE Vec3<T> apply(const Vec3<T> &v) const noexcept {
-    return {std::fma(a02, v.z, std::fma(a01, v.y, a00 * v.x)),
-            std::fma(a12, v.z, std::fma(a11, v.y, a10 * v.x)),
-            std::fma(a22, v.z, std::fma(a21, v.y, a20 * v.x))};
+template <class T> struct Mat3{
+  T a00,a01,a02,a10,a11,a12,a20,a21,a22;
+  PCC_ALWAYS_INLINE Vec3<T> apply(const Vec3<T>&v) const noexcept {
+    return { detail::fmadd(a02,v.z,detail::fmadd(a01,v.y,a00*v.x)),
+             detail::fmadd(a12,v.z,detail::fmadd(a11,v.y,a10*v.x)),
+             detail::fmadd(a22,v.z,detail::fmadd(a21,v.y,a20*v.x)) };
   }
-
-  PCC_ALWAYS_INLINE Mat3 mul(const Mat3 &B) const noexcept {
-    const Mat3 &A = *this;
-    return {std::fma(A.a01, B.a10, std::fma(A.a02, B.a20, A.a00 * B.a00)),
-            std::fma(A.a01, B.a11, std::fma(A.a02, B.a21, A.a00 * B.a01)),
-            std::fma(A.a01, B.a12, std::fma(A.a02, B.a22, A.a00 * B.a02)),
-
-            std::fma(A.a11, B.a10, std::fma(A.a12, B.a20, A.a10 * B.a00)),
-            std::fma(A.a11, B.a11, std::fma(A.a12, B.a21, A.a10 * B.a01)),
-            std::fma(A.a11, B.a12, std::fma(A.a12, B.a22, A.a10 * B.a02)),
-
-            std::fma(A.a21, B.a10, std::fma(A.a22, B.a20, A.a20 * B.a00)),
-            std::fma(A.a21, B.a11, std::fma(A.a22, B.a21, A.a20 * B.a01)),
-            std::fma(A.a21, B.a12, std::fma(A.a22, B.a22, A.a20 * B.a02))};
+  PCC_ALWAYS_INLINE Mat3 mul(const Mat3&B) const noexcept {
+    const Mat3&A=*this;
+    return {
+      detail::fmadd(A.a01,B.a10,detail::fmadd(A.a02,B.a20,A.a00*B.a00)),
+      detail::fmadd(A.a01,B.a11,detail::fmadd(A.a02,B.a21,A.a00*B.a01)),
+      detail::fmadd(A.a01,B.a12,detail::fmadd(A.a02,B.a22,A.a00*B.a02)),
+      detail::fmadd(A.a11,B.a10,detail::fmadd(A.a12,B.a20,A.a10*B.a00)),
+      detail::fmadd(A.a11,B.a11,detail::fmadd(A.a12,B.a21,A.a10*B.a01)),
+      detail::fmadd(A.a11,B.a12,detail::fmadd(A.a12,B.a22,A.a10*B.a02)),
+      detail::fmadd(A.a21,B.a10,detail::fmadd(A.a22,B.a20,A.a20*B.a00)),
+      detail::fmadd(A.a21,B.a11,detail::fmadd(A.a22,B.a21,A.a20*B.a01)),
+      detail::fmadd(A.a21,B.a12,detail::fmadd(A.a22,B.a22,A.a20*B.a02))
+    };
   }
-
-  static PCC_ALWAYS_INLINE Mat3 rotZ(T a) noexcept {
-    T s, c;
-    detail::fast_sincos(a, s, c);
-    return {c, -s, 0, s, c, 0, 0, 0, 1};
-  }
-  static PCC_ALWAYS_INLINE Mat3 rotY(T a) noexcept {
-    T s, c;
-    detail::fast_sincos(a, s, c);
-    return {c, 0, s, 0, 1, 0, -s, 0, c};
-  }
+  static PCC_ALWAYS_INLINE Mat3 rotZ(T a) noexcept { T s,c; fsincos(a,s,c); return {c,-s,0,s,c,0,0,0,1}; }
+  static PCC_ALWAYS_INLINE Mat3 rotY(T a) noexcept { T s,c; fsincos(a,s,c); return {c,0,s,0,1,0,-s,0,c}; }
 };
 
-// Closed form of Rz(phi) * Ry(theta) * Rz(-phi)
 template <class T>
-PCC_ALWAYS_INLINE Mat3<T> RzRyRz_compact(T phi, T theta) noexcept {
-  T sphi, cphi;
-  detail::fast_sincos(phi, sphi, cphi);
-  T stheta, ctheta;
-  detail::fast_sincos(theta, stheta, ctheta);
-
-  const T cphi2 = cphi * cphi;
-  const T sphi2 = sphi * sphi;
-  const T cs = cphi * sphi;
-  return {cphi2 * ctheta + sphi2, cs * (ctheta - T(1)),   cphi * stheta,
-          cs * (ctheta - T(1)),   sphi2 * ctheta + cphi2, sphi * stheta,
-          -cphi * stheta,         -sphi * stheta,         ctheta};
+PCC_ALWAYS_INLINE Mat3<T> RzRyRz(T phi, T theta) noexcept {
+  T sp,cp; fsincos(phi,sp,cp);
+  T st,ct; fsincos(theta,st,ct);
+  const T r00=cp,r01=-sp,r02=0,r10=sp,r11=cp,r12=0,r20=0,r21=0,r22=1;
+  const Mat3<T> Ry={ct,0,st,0,1,0,-st,0,ct};
+  const Mat3<T> Rzm={cp,sp,0,-sp,cp,0,0,0,1};
+  const Mat3<T> Rzr={
+    r00*Ry.a00 + r01*Ry.a10 + r02*Ry.a20,
+    r00*Ry.a01 + r01*Ry.a11 + r02*Ry.a21,
+    r00*Ry.a02 + r01*Ry.a12 + r02*Ry.a22,
+    r10*Ry.a00 + r11*Ry.a10 + r12*Ry.a20,
+    r10*Ry.a01 + r11*Ry.a11 + r12*Ry.a21,
+    r10*Ry.a02 + r11*Ry.a12 + r12*Ry.a22,
+    r20*Ry.a00 + r21*Ry.a10 + r22*Ry.a20,
+    r20*Ry.a01 + r21*Ry.a11 + r22*Ry.a21,
+    r20*Ry.a02 + r21*Ry.a12 + r22*Ry.a22
+  };
+  return Rzr.mul(Rzm);
 }
 
-template <class T> PCC_ALWAYS_INLINE Mat3<T> RzRyRz(T phi, T theta) noexcept {
-  return RzRyRz_compact<T>(phi, theta);
-}
-
-// ------------------------------ problem config
-// -------------------------------------------
-struct SegmentBounds {
+struct SegmentBounds{
   Real theta_min{}, theta_max{};
-  bool has_phi_bounds{};
-  Real phi_min{}, phi_max{};
+  bool has_phi_bounds{}; Real phi_min{}, phi_max{};
   Real L_min{}, L_max{};
   Real passive_L_min{}, passive_L_max{};
   Real active_L_max{};
   Real bevel_angle_deg{Real(45)};
   Real rigid_tip_length{};
 };
-
-struct SolverConst {
+struct SolverConst{
   Real s1{}, L1p{};
   Real s2_fixed{};
   Real d_min{}, d_max{};
-  Real pos_tol{Real(1e-6)};
-  Real bevel_tol_deg{Real(1e-6)};
+  Real pos_tol{Real(1e-5)};
+  Real bevel_tol_deg{Real(1e-5)};
   Real angle_target_deg{Real(45)};
 };
 
-// ------------------------------ utilities (Real specialization)
-// --------------------------
-static inline Real wrap_0_2pi_R(Real a) { return detail::wrap_0_2pi(a); }
-static inline Real project_angle_to_interval(Real phi, Real lo, Real hi) {
-  return detail::project_angle_to_interval(phi, lo, hi);
+static inline Real wrap0(Real a){ return detail::wrap_0_2pi(a); }
+static inline Real proj_ang(Real a, Real lo, Real hi){ return detail::project_angle_to_interval(a,lo,hi); }
+static inline bool clamp_box(Real &x, Real lo, Real hi, Real tol){ return detail::snap_to_box(x,lo,hi,tol); }
+
+template<class S>
+PCC_ALWAYS_INLINE void A_B_generic(S t, S& A, S& B){
+  using std::sin; using std::cos;
+  S h = S(0.5)*t;
+  auto s = sin(h), c = cos(h);
+  A = (S(2)*s*s)/t;
+  B = (S(2)*s*c)/t;
 }
-static inline bool snap_to_box(Real &x, Real lo, Real hi, Real tol) {
-  return detail::snap_to_box(x, lo, hi, tol);
+template<>
+PCC_ALWAYS_INLINE void A_B_generic<Real>(Real t, Real& A, Real& B){
+  detail::A_B_scalar_stable_ab(t,A,B);
 }
 
-// ------------------------------ geometry kernels
-// -----------------------------------------
-template <class T>
-PCC_ALWAYS_INLINE void
-inner_angles_from_orientation(const Mat3<T> &R1, const Vec3<T> &n_star, T alpha,
-                              T &phi2_wrapped, T &theta2, Vec3<T> &z2_world,
-                              Mat3<T> &R2) noexcept {
-  // n' = R1^T * n*
-  const Vec3<T> nprime{
-      R1.a00 * n_star.x + R1.a10 * n_star.y + R1.a20 * n_star.z,
-      R1.a01 * n_star.x + R1.a11 * n_star.y + R1.a21 * n_star.z,
-      R1.a02 * n_star.x + R1.a12 * n_star.y + R1.a22 * n_star.z};
-
-  T salpha, calpha;
-  detail::fast_sincos(alpha, salpha, calpha);
-  const T x = nprime.x - salpha, y = nprime.y;
-  const T phi2 = std::atan2(y, x);
-
-  T sph, cph;
-  detail::fast_sincos(phi2, sph, cph);
-  const T ux = salpha * cph, uz = calpha;
-  const T wx = cph * nprime.x + sph * nprime.y;
-  const T wz = nprime.z;
-
-  const T den = std::max(ux * ux + uz * uz, std::numeric_limits<T>::epsilon());
-  const T cos_th = (ux * wx + uz * wz) / den;
-  const T sin_th = (uz * wx - ux * wz) / den;
-  theta2 = std::atan2(sin_th, cos_th);
-
-  constexpr T deg2rad = std::numbers::pi_v<T> / T(180);
-  if (std::abs(theta2) < (T(0.5) * deg2rad)) [[likely]] {
-    R2 = {T(1), 0, 0, 0, T(1), 0, 0, 0, T(1)};
-    z2_world = {T(0), T(0), T(1)};
-    phi2_wrapped = detail::wrap_0_2pi(phi2);
-    theta2 = T(0);
-    return;
+template<class S>
+PCC_ALWAYS_INLINE void inner_angles_from_orientation_generic(
+  const Mat3<S>& R1, const Vec3<Real>& n_world, Real alpha,
+  S &phi2_wrapped, S &theta2, Vec3<S> &z2_world, Mat3<S> &R2) noexcept
+{
+  Vec3<S> nprime{
+    R1.a00*S(n_world.x) + R1.a10*S(n_world.y) + R1.a20*S(n_world.z),
+    R1.a01*S(n_world.x) + R1.a11*S(n_world.y) + R1.a21*S(n_world.z),
+    R1.a02*S(n_world.x) + R1.a12*S(n_world.y) + R1.a22*S(n_world.z)
+  };
+  S nrm = nprime.norm();
+  if (valof(nrm) > 0) {
+    S inv = S(1)/nrm; nprime = {nprime.x*inv, nprime.y*inv, nprime.z*inv};
   }
-
+  S sa = S(std::sin(alpha)), ca = S(std::cos(alpha));
+  S phi2 = (std::abs(std::sin(alpha)) < 1e-7) ? atan2(nprime.y, nprime.x) : atan2(nprime.y, nprime.x - sa);
+  Mat3<S> Rz_minus = Mat3<S>::rotZ(-phi2);
+  Vec3<S> n2 = Rz_minus.apply(nprime);
+  Vec3<S> v  = Rz_minus.apply({ sa, S(0), ca });
+  S vx=v.x, vz=v.z, nx=n2.x, nz=n2.z;
+  S denom = vx*vx + vz*vz;
+  S cos_th = (vx*nx + vz*nz) / denom;
+  S sin_th = (vz*nx - vx*nz) / denom;
+  S r = hypot(cos_th, sin_th);
+  if (valof(r) > 0) { cos_th = cos_th / r; sin_th = sin_th / r; }
+  theta2 = atan2(sin_th, cos_th);
   R2 = RzRyRz(phi2, theta2);
-  z2_world = {R2.a02, R2.a12, R2.a22};
-  phi2_wrapped = detail::wrap_0_2pi(phi2);
+  z2_world = { R2.a02, R2.a12, R2.a22 };
+  phi2_wrapped = wrap0_any(phi2);
 }
 
-struct Cand {
+template<class S>
+struct FKGenOut{
+  Vec3<S> end_no_d{}, end_with_d{}, b_world{};
+  Mat3<S> R1{}, R2{}, Rtot{};
+  S theta2{}, phi2{}, l2p{};
+};
+
+template<class S>
+PCC_ALWAYS_INLINE FKGenOut<S> forward_exact_generic(
+  S theta1, S phi1,
+  const Vec3<Real>& P_star, const Vec3<Real>& n_star_in,
+  const SegmentBounds& seg1, const SegmentBounds& seg2, const SolverConst& sc)
+{
+  FKGenOut<S> o;
+  Vec3<Real> n_star = Vec3<Real>{n_star_in.x,n_star_in.y,n_star_in.z}.normalized();
+  S A1,B1; A_B_generic(theta1,A1,B1);
+  auto sphi1 = sin(phi1), cphi1 = cos(phi1);
+  Vec3<S> p_bend{ S(sc.s1)*A1*cphi1, S(sc.s1)*A1*sphi1, S(sc.s1)*B1 };
+  Vec3<S> p1{S(0),S(0),S(sc.L1p)}; p1 = p1 + p_bend;
+  o.R1 = RzRyRz(phi1, theta1);
+  Real alpha = seg2.bevel_angle_deg * (std::numbers::pi_v<Real> / Real(180));
+  Vec3<S> z2w; inner_angles_from_orientation_generic(o.R1, n_star, alpha, o.phi2, o.theta2, z2w, o.R2);
+  S A2,B2; A_B_generic(o.theta2,A2,B2);
+  Mat3<S> Rz2 = Mat3<S>::rotZ(o.phi2);
+  Vec3<S> v2_local{ S(sc.s2_fixed)*A2, S(0), S(sc.s2_fixed)*B2 };
+  Vec3<S> Rz2_v2 = Rz2.apply(v2_local);
+  Vec3<S> R2_ez = o.R2.apply({S(0),S(0),S(1)});
+  Vec3<S> dP{ S(P_star.x) - p1.x, S(P_star.y) - p1.y, S(P_star.z) - p1.z };
+  Vec3<S> dP_local{
+    o.R1.a00*dP.x + o.R1.a10*dP.y + o.R1.a20*dP.z,
+    o.R1.a01*dP.x + o.R1.a11*dP.y + o.R1.a21*dP.z,
+    o.R1.a02*dP.x + o.R1.a12*dP.y + o.R1.a22*dP.z
+  };
+  Real stub = std::max<Real>(Real(0), seg2.rigid_tip_length);
+  S l2p_unc = dP_local.z - ( S(sc.s2_fixed)*B2 + S(stub)*R2_ez.z );
+  Real lmin = seg2.passive_L_min, lmax = seg2.passive_L_max;
+  if (lmax < lmin) { lmin = Real(0); lmax = Real(0); }
+  o.l2p = clamp_any(l2p_unc, lmin, lmax);
+  Vec3<S> pre{S(0),S(0),o.l2p};
+  Vec3<S> tip_rigid = R2_ez * S(stub);
+  Vec3<S> q_local = pre + Rz2_v2 + tip_rigid;
+  Vec3<S> R1_q = o.R1.apply(q_local);
+  Vec3<S> end_p_no_d{ p1.x + R1_q.x, p1.y + R1_q.y, p1.z + R1_q.z };
+  o.end_no_d = end_p_no_d;
+  S d_best = clamp_any(S(P_star.z) - end_p_no_d.z, sc.d_min, sc.d_max);
+  o.end_with_d = { end_p_no_d.x, end_p_no_d.y, end_p_no_d.z + d_best };
+  o.Rtot = o.R1.mul(o.R2);
+  Vec3<S> b0{ S(std::sin(alpha)), S(0), S(std::cos(alpha)) };
+  o.b_world = o.Rtot.apply(b0);
+  return o;
+}
+
+template<class S>
+PCC_ALWAYS_INLINE Vec3<S> residual_generic(S theta1, S phi1,
+  const Vec3<Real>& P_star, const Vec3<Real>& n_star,
+  const SegmentBounds& seg1, const SegmentBounds& seg2, const SolverConst& sc)
+{
+  auto fk = forward_exact_generic<S>(theta1, phi1, P_star, n_star, seg1, seg2, sc);
+  return { fk.end_with_d.x - S(P_star.x), fk.end_with_d.y - S(P_star.y), fk.end_with_d.z - S(P_star.z) };
+}
+
+static PCC_ALWAYS_INLINE Real theta1_seed_from_xy_radial(Real rho, Real s1, Real th_min, Real th_max){
+  rho = std::max<Real>(0, rho);
+  if (s1 <= Real(1e-9)) return std::clamp<Real>(0, th_min, th_max);
+  const Real y = std::min<Real>(rho / s1, Real(0.99));
+  Real t = std::clamp<Real>(Real(2)*y, std::max(th_min, Real(1e-4)), th_max);
+  for (int i=0;i<6;++i){
+    Real A,B,Ap,Bp; detail::A_B_scalar_stable_full(t,A,B,Ap,Bp);
+    const Real f  = s1*A - rho;
+    const Real fp = s1*Ap + Real(1e-8);
+    t = std::clamp<Real>(t - f/fp, th_min, th_max);
+  }
+  return t;
+}
+
+struct FKOut{
+  Vec3<Real> end_no_d{}, end_with_d{};
+  Mat3<Real> R1{}, R2{}, Rtot{};
+  Vec3<Real> b_world{};
+  Real theta2{}, phi2{}, l2p{};
+  bool feasible{true};
+};
+
+static PCC_ALWAYS_INLINE FKOut forward_exact(
+  Real theta1, Real phi1,
+  const Vec3<Real>& P_star, const Vec3<Real>& n_star_in,
+  const SegmentBounds& seg1, const SegmentBounds& seg2, const SolverConst& sc)
+{
+  set_thread_qos_interactive();
+  auto fk = forward_exact_generic<Real>(theta1, phi1, P_star, n_star_in, seg1, seg2, sc);
+  FKOut o;
+  o.end_no_d=fk.end_no_d; o.end_with_d=fk.end_with_d;
+  o.R1=fk.R1; o.R2=fk.R2; o.Rtot=fk.Rtot;
+  o.b_world=fk.b_world;
+  o.theta2=fk.theta2; o.phi2=fk.phi2; o.l2p=fk.l2p;
+  return o;
+}
+
+struct Cand{
   Real pos_err{}, ang_err_deg{}, translation{}, abs_d{};
-  Real theta1{}, phi1{}, theta2{}, phi2{}, L2p{};
-  bool ok = false;
+  Real theta1{}, phi1{}, theta2{}, phi2{}, l2p{};
+  bool ok=false;
   Vec3<Real> end_p{}, b_world{};
 };
 
-static PCC_HOT PCC_FLATTEN Cand evaluate_once(Real theta1, Real phi1,
-                                              const Vec3<Real> &P_star,
-                                              const Vec3<Real> &n_star_in,
-                                              const SegmentBounds &seg1,
-                                              const SegmentBounds &seg2,
-                                              const SolverConst &sc) noexcept {
-  Cand out;
-  out.ok = false;
-
+static PCC_HOT PCC_FLATTEN Cand evaluate_once_core(
+  Real theta1, Real phi1,
+  const Vec3<Real>& P_star, const Vec3<Real>& n_star_in,
+  const SegmentBounds& seg1, const SegmentBounds& seg2, const SolverConst& sc)
+{
+  Cand out; out.ok=false;
   const Vec3<Real> n_star = n_star_in.normalized();
-
   const Real tol_th = Real(1e-4) * (std::numbers::pi_v<Real> / Real(180));
-  const Real tol_th2 = Real(1e-4) * (std::numbers::pi_v<Real> / Real(180));
-
-  if (!snap_to_box(theta1, seg1.theta_min, seg1.theta_max, tol_th))
-    return out;
-
-  if (seg1.has_phi_bounds)
-    phi1 = project_angle_to_interval(phi1, seg1.phi_min, seg1.phi_max);
-  else
-    phi1 = wrap_0_2pi_R(phi1);
-
-  const Mat3<Real> R1 = RzRyRz(phi1, theta1);
-
-  Real A1, B1;
-  detail::A_B_scalar_stable_ab(theta1, A1, B1);
-
-  Real sphi1, cphi1;
-  detail::fast_sincos(phi1, sphi1, cphi1);
-  const Vec3<Real> p_bend{sc.s1 * A1 * cphi1, sc.s1 * A1 * sphi1, sc.s1 * B1};
-  Vec3<Real> p1{Real(0), Real(0), sc.L1p};
-  p1 = p1 + p_bend;
-
-  const Real alpha =
-      seg2.bevel_angle_deg * (std::numbers::pi_v<Real> / Real(180));
-  const Real cos_bevel_tol =
-      std::cos(sc.bevel_tol_deg * (std::numbers::pi_v<Real> / Real(180)));
-
-  Mat3<Real> R2;
-  Vec3<Real> z2w_unused;
-  Real phi2, theta2;
-  inner_angles_from_orientation(R1, n_star, alpha, phi2, theta2, z2w_unused,
-                                R2);
-
-  if (!snap_to_box(theta2, seg2.theta_min, seg2.theta_max, tol_th2))
-    return out;
-
-  if (seg2.has_phi_bounds) {
-    if (!(seg2.phi_min - Real(1e-9) <= phi2 &&
-          phi2 <= seg2.phi_max + Real(1e-9))) {
-      const Real phi2_proj =
-          project_angle_to_interval(phi2, seg2.phi_min, seg2.phi_max);
-      if (phi2_proj != phi2) {
-        phi2 = phi2_proj;
-        R2 = RzRyRz(phi2, theta2);
-      }
-    }
-  }
-
-  Real A2, B2;
-  detail::A_B_scalar_stable_ab(theta2, A2, B2);
-  const Vec3<Real> v2_local{sc.s2_fixed * A2, Real(0), sc.s2_fixed * B2};
-
-  const Mat3<Real> Rz2 = Mat3<Real>::rotZ(phi2);
-  const Vec3<Real> Rz2_v2 = Rz2.apply(v2_local);
-  const Vec3<Real> R2_ez = R2.apply({Real(0), Real(0), Real(1)});
-
-  const Vec3<Real> dP{P_star.x - p1.x, P_star.y - p1.y, P_star.z - p1.z};
-  const Vec3<Real> dP_local{R1.a00 * dP.x + R1.a10 * dP.y + R1.a20 * dP.z,
-                            R1.a01 * dP.x + R1.a11 * dP.y + R1.a21 * dP.z,
-                            R1.a02 * dP.x + R1.a12 * dP.y + R1.a22 * dP.z};
-
-  Real L2p = dP_local.z - seg2.rigid_tip_length * R2_ez.z - sc.s2_fixed * B2;
-
-  const Real tol_L = Real(5e-4);
-  const Real L2p_lo = seg2.passive_L_min;
-  const Real L2p_hi = seg2.passive_L_max;
-  if (L2p < L2p_lo - tol_L || L2p > L2p_hi + tol_L) [[unlikely]]
-    return out;
-  if (L2p < L2p_lo)
-    L2p = L2p_lo;
-  if (L2p > L2p_hi)
-    L2p = L2p_hi;
-
-  const Real L2_total_max = seg2.L_max;
-  if (sc.s2_fixed + L2p > L2_total_max + tol_L) {
-    if (L2_total_max < sc.s2_fixed - tol_L) [[unlikely]]
-      return out;
-    L2p = std::max(L2p_lo, std::min(L2p_hi, L2_total_max - sc.s2_fixed));
-  }
-
-  const Vec3<Real> q_no_L2p{Rz2_v2.x + seg2.rigid_tip_length * R2_ez.x,
-                            Rz2_v2.y + seg2.rigid_tip_length * R2_ez.y,
-                            Rz2_v2.z + seg2.rigid_tip_length * R2_ez.z};
-  const Vec3<Real> q_local{q_no_L2p.x, q_no_L2p.y, q_no_L2p.z + L2p};
-  const Vec3<Real> R1_q = R1.apply(q_local);
-  const Vec3<Real> end_p_no_d{p1.x + R1_q.x, p1.y + R1_q.y, p1.z + R1_q.z};
-
-  const Real d_best = std::clamp(P_star.z - end_p_no_d.z, sc.d_min, sc.d_max);
-  const Vec3<Real> end_p{end_p_no_d.x, end_p_no_d.y, end_p_no_d.z + d_best};
-
-  const Mat3<Real> R1R2 = R1.mul(R2);
-  const Vec3<Real> b0{std::sin(alpha), Real(0), std::cos(alpha)};
-  const Vec3<Real> b_world = R1R2.apply(b0);
-
-  const Real cb = std::clamp(b_world.dot(n_star), Real(-1), Real(1));
-
-  const Vec3<Real> diff{end_p.x - P_star.x, end_p.y - P_star.y,
-                        end_p.z - P_star.z};
+  if (!clamp_box(theta1, seg1.theta_min, seg1.theta_max, tol_th)) return out;
+  phi1 = seg1.has_phi_bounds ? proj_ang(phi1, seg1.phi_min, seg1.phi_max) : wrap0(phi1);
+  FKOut fk = forward_exact(theta1, phi1, P_star, n_star, seg1, seg2, sc);
+  const Real cb = std::clamp(fk.b_world.dot(n_star), Real(-1), Real(1));
+  const Real cos_bevel_tol = std::cos(sc.bevel_tol_deg * (std::numbers::pi_v<Real> / Real(180)));
+  const Vec3<Real> diff{ fk.end_with_d.x - P_star.x, fk.end_with_d.y - P_star.y, fk.end_with_d.z - P_star.z };
   const Real pos_err2 = diff.dot(diff);
   const Real pos_tol2 = detail::sqr(sc.pos_tol) + Real(1e-12);
-  if (pos_err2 > pos_tol2 || cb < cos_bevel_tol) [[unlikely]]
-    return out;
-  const Real pos_err = std::sqrt(pos_err2);
-
-  const Vec3<Real> ezw = R1R2.apply({Real(0), Real(0), Real(1)});
+  if (pos_err2 > pos_tol2 || cb < cos_bevel_tol) return out;
+  const Real ang_target = sc.angle_target_deg * (std::numbers::pi_v<Real> / Real(180));
+  const Vec3<Real> ezw = fk.Rtot.apply({Real(0),Real(0),Real(1)});
   const Real cos_axis = std::clamp(ezw.dot(n_star), Real(-1), Real(1));
-  const Real ang_err_deg =
-      std::abs(std::acos(cos_axis) * Real(180) / std::numbers::pi_v<Real> -
-               sc.angle_target_deg);
-
+  const Real ang_err_deg = std::abs(std::acos(cos_axis) - ang_target) * Real(180)/std::numbers::pi_v<Real>;
   out.ok = true;
-  out.pos_err = pos_err;
+  out.pos_err = std::sqrt(pos_err2);
   out.ang_err_deg = ang_err_deg;
-  out.translation = d_best;
-  out.abs_d = std::abs(d_best);
-  out.theta1 = theta1;
-  out.phi1 = wrap_0_2pi_R(phi1);
-  out.theta2 = theta2;
-  out.phi2 = wrap_0_2pi_R(phi2);
-  out.L2p = L2p;
-  out.end_p = end_p;
-  out.b_world = b_world;
+  out.translation = fk.end_with_d.z - fk.end_no_d.z;
+  out.abs_d = std::abs(out.translation);
+  out.theta1 = theta1; out.phi1 = wrap0(phi1);
+  out.theta2 = fk.theta2; out.phi2 = wrap0(fk.phi2);
+  out.l2p = fk.l2p;
+  out.end_p = fk.end_with_d;
+  out.b_world = fk.b_world;
   return out;
 }
 
-static std::pair<Real, Cand>
-brent_refine_phi_native(Real theta1, Real phi_seed, Real halfspan_deg,
-                        int maxiter, const Vec3<Real> &P_star,
-                        const Vec3<Real> &n_star, const SegmentBounds &seg1,
-                        const SegmentBounds &seg2, const SolverConst &sc) {
-  pcc_set_thread_qos_interactive();
-  const Real span = halfspan_deg * (std::numbers::pi_v<Real> / Real(180));
-  Real a = phi_seed - span, b = phi_seed + span;
-
-  struct ScoreFn {
-    Real theta1;
-    const Vec3<Real> &P_star;
-    const Vec3<Real> &n_star;
-    const SegmentBounds &seg1;
-    const SegmentBounds &seg2;
-    const SolverConst &sc;
-
-    PCC_ALWAYS_INLINE Real operator()(Real ph) const noexcept {
-      auto c = evaluate_once(theta1, ph, P_star, n_star, seg1, seg2, sc);
-      if (!c.ok)
-        return Real(1e9);
-      return c.pos_err + Real(1e-6) * c.ang_err_deg;
-    }
-  } score{theta1, P_star, n_star, seg1, seg2, sc};
-
-  const Real invphi = (std::sqrt(Real(5)) - Real(1)) / Real(2);
-  Real x = a + invphi * (b - a), w = x, v = x;
-  Real fx = score(x), fw = fx, fv = fx;
-  Real d = 0, e = 0;
-  const Real tol = Real(2e-6);
-  constexpr Real eps = std::numeric_limits<Real>::epsilon();
-
-  for (int it = 0; it < maxiter; ++it) {
-    const Real m = (a + b) * Real(0.5);
-    const Real tol1 = std::sqrt(eps) * std::abs(x) + tol / Real(3);
-    const Real tol2 = tol1 * Real(2);
-    if (std::abs(x - m) <= tol2 - Real(0.5) * (b - a))
-      break;
-
-    Real p = 0, q = 0, r = 0;
-    if (std::abs(e) > tol1) {
-      r = (x - w) * (fx - fv);
-      q = (x - v) * (fx - fw);
-      p = (x - v) * q - (x - w) * r;
-      q = Real(2) * (q - r);
-      if (q > 0)
-        p = -p;
-      q = std::abs(q);
-
-      if (std::abs(p) < std::abs(Real(0.5) * q * e) && p > q * (a - x) &&
-          p < q * (b - x)) {
-        d = p / q;
-        const Real u = x + d;
-        if ((u - a) < tol2 || (b - u) < tol2)
-          d = (x < m) ? tol1 : -tol1;
-      } else {
-        e = (x >= m) ? (a - x) : (b - x);
-        d = invphi * e;
-      }
-    } else {
-      e = (x >= m) ? (a - x) : (b - x);
-      d = invphi * e;
-    }
-    const Real u = x + (std::abs(d) >= tol1 ? d : (d > 0 ? tol1 : -tol1));
-    const Real fu = score(u);
-
-    if (fu <= fx) {
-      if (u < x)
-        b = x;
-      else
-        a = x;
-      v = w;
-      fv = fw;
-      w = x;
-      fw = fx;
-      x = u;
-      fx = fu;
-    } else {
-      if (u < x)
-        a = u;
-      else
-        b = u;
-      if (fu <= fw || w == x) {
-        v = w;
-        fv = fw;
-        w = u;
-        fw = fu;
-      } else if (fu <= fv || v == x || v == w) {
-        v = u;
-        fv = fu;
-      }
-    }
-  }
-  auto best = evaluate_once(theta1, x, P_star, n_star, seg1, seg2, sc);
-  return {x, best};
+static void residual_and_jacobian(
+  Real theta1, Real phi1,
+  const Vec3<Real>& P_star, const Vec3<Real>& n_star,
+  const SegmentBounds& seg1, const SegmentBounds& seg2, const SolverConst& sc,
+  Vec3<Real>& r, Real J[3][2])
+{
+  Dual2<Real> th(theta1,1,0), ph(phi1,0,1);
+  auto rr = residual_generic<Dual2<Real>>(th, ph, P_star, n_star, seg1, seg2, sc);
+  r = { rr.x.v, rr.y.v, rr.z.v };
+  J[0][0]=rr.x.d0; J[0][1]=rr.x.d1;
+  J[1][0]=rr.y.d0; J[1][1]=rr.y.d1;
+  J[2][0]=rr.z.d0; J[2][1]=rr.z.d1;
 }
 
-static std::pair<Vec3<Real>, std::pair<Real, Real>>
-lm_polish_native(Real theta1, Real phi1, int iters, const Vec3<Real> &P_star,
-                 const Vec3<Real> &n_star, const SegmentBounds &seg1,
-                 const SegmentBounds &seg2, const SolverConst &sc,
-                 Real &out_pos_err, Real &out_ang_err, Real &out_abs_d,
-                 Real &best_th, Real &best_ph) {
-  pcc_set_thread_qos_interactive();
-  const Real tol_th = Real(1e-4) * (std::numbers::pi_v<Real> / Real(180));
-  const Real wb = Real(1e-6);
-  Real lam = Real(1e-2);
-  const Real sqrt_eps = std::sqrt(std::numeric_limits<Real>::epsilon());
-
-  auto residual = [&](Real th, Real ph, Vec3<Real> &endp,
-                      Vec3<Real> &bev) -> std::array<Real, 6> {
-    auto c = evaluate_once(th, ph, P_star, n_star, seg1, seg2, sc);
-    if (!c.ok) {
-      endp = {0, 0, 0};
-      bev = {0, 0, 0};
-      return {Real(1e3), Real(1e3), Real(1e3), Real(1e2), Real(1e2), Real(1e2)};
-    }
-    endp = c.end_p;
-    bev = c.b_world;
-    const Vec3<Real> rp{P_star.x - endp.x, P_star.y - endp.y,
-                        P_star.z - endp.z};
-    const Vec3<Real> bn = bev.normalized();
-    const Vec3<Real> rb{n_star.x - bn.x, n_star.y - bn.y, n_star.z - bn.z};
-    const Real sw = std::sqrt(wb);
-    return {rp.x, rp.y, rp.z, sw * rb.x, sw * rb.y, sw * rb.z};
-  };
-
-  auto objective = [&](Real th, Real ph) -> Real {
-    auto c = evaluate_once(th, ph, P_star, n_star, seg1, seg2, sc);
-    if (!c.ok)
-      return Real(1e9);
-    return c.pos_err + Real(1e-9) * c.ang_err_deg + Real(1e-7) * c.abs_d;
-  };
-
-  Real th = theta1, ph = phi1;
-  Real f_best = objective(th, ph);
-  best_th = th;
-  best_ph = ph;
-
-  for (int it = 0; it < iters; ++it) {
-    Vec3<Real> endp{}, bev{};
-    const auto r = residual(th, ph, endp, bev);
-
-    // Scale-aware finite differences
-    const Real hth = sqrt_eps * std::max<Real>(1, std::abs(th));
-    const Real hph = sqrt_eps * std::max<Real>(1, std::abs(ph));
-
-    std::array<Real, 6> rp, rm;
-    Real Jth[6]{}, Jph[6]{};
-
-    {
-      Vec3<Real> e1{}, b1{}, e2{}, b2{};
-      rp = residual(th + hth, ph, e1, b1);
-      rm = residual(th - hth, ph, e2, b2);
-    }
-    for (int i = 0; i < 6; ++i)
-      Jth[i] = (rp[i] - rm[i]) / (Real(2) * hth);
-
-    {
-      Vec3<Real> e1{}, b1{}, e2{}, b2{};
-      rp = residual(th, ph + hph, e1, b1);
-      rm = residual(th, ph - hph, e2, b2);
-    }
-    for (int i = 0; i < 6; ++i)
-      Jph[i] = (rp[i] - rm[i]) / (Real(2) * hph);
-
-    Real a00 = 0, a01 = 0, a11 = 0, g0 = 0, g1 = 0;
-    for (int i = 0; i < 6; ++i) {
-      a00 += Jth[i] * Jth[i];
-      a01 += Jth[i] * Jph[i];
-      a11 += Jph[i] * Jph[i];
-      g0 += -Jth[i] * r[i];
-      g1 += -Jph[i] * r[i];
-    }
-    a00 += lam;
-    a11 += lam;
-
-    const Real det = a00 * a11 - a01 * a01;
-    Real s0 = 0, s1 = 0;
-    if (std::abs(det) > Real(1e-20)) {
-      s0 = (a11 * g0 - a01 * g1) / det;
-      s1 = (-a01 * g0 + a00 * g1) / det;
-    }
-
-    Real th_try = th + s0;
-    if (!snap_to_box(th_try, seg1.theta_min, seg1.theta_max, tol_th)) {
-      lam *= Real(2);
-      continue;
-    }
-    Real ph_try = ph + s1;
-    ph_try = seg1.has_phi_bounds
-                 ? project_angle_to_interval(ph_try, seg1.phi_min, seg1.phi_max)
-                 : wrap_0_2pi_R(ph_try);
-
-    const Real f_try = objective(th_try, ph_try);
-    if (f_try < f_best) {
-      th = th_try;
-      ph = ph_try;
-      f_best = f_try;
-      best_th = th;
-      best_ph = ph;
-      lam *= Real(0.5);
-    } else {
-      lam *= Real(2);
-    }
+static bool solve_outer_lm(
+  const Vec3<Real>& P_star, const Vec3<Real>& n_star,
+  const SegmentBounds& seg1, const SegmentBounds& seg2, const SolverConst& sc,
+  Real &theta1, Real &phi1)
+{
+  const Real rho = std::sqrt(P_star.x*P_star.x + P_star.y*P_star.y);
+  phi1 = std::atan2(P_star.y, P_star.x);
+  if (seg1.has_phi_bounds) phi1 = proj_ang(phi1, seg1.phi_min, seg1.phi_max);
+  theta1 = theta1_seed_from_xy_radial(rho, sc.s1, seg1.theta_min, seg1.theta_max);
+  {
+    const Mat3<Real> R1s = RzRyRz(phi1, theta1);
+    const Real alpha = seg2.bevel_angle_deg * (std::numbers::pi_v<Real> / Real(180));
+    Real phi2, th2; Vec3<Real> z2w; Mat3<Real> R2;
+    inner_angles_from_orientation_generic(R1s, n_star, alpha, phi2, th2, z2w, R2);
+    Real A2,B2; detail::A_B_scalar_stable_ab(th2, A2, B2);
+    const Mat3<Real> Rz2 = Mat3<Real>::rotZ(phi2);
+    const Vec3<Real> v2_local{ sc.s2_fixed*A2, Real(0), sc.s2_fixed*B2 };
+    const Vec3<Real> Rz2_v2 = Rz2.apply(v2_local);
+    const Vec3<Real> R2_ez = R2.apply({Real(0),Real(0),Real(1)});
+    const Real stub = std::max<Real>(Real(0), seg2.rigid_tip_length);
+    const Real est_xy = std::sqrt( detail::sqr(Rz2_v2.x + stub*R2_ez.x)
+                                 + detail::sqr(Rz2_v2.y + stub*R2_ez.y) );
+    const Real rho_eff = std::max<Real>(0, rho - est_xy);
+    theta1 = theta1_seed_from_xy_radial(rho_eff, sc.s1, seg1.theta_min, seg1.theta_max);
   }
-
-  const auto cfin =
-      evaluate_once(best_th, best_ph, P_star, n_star, seg1, seg2, sc);
-  out_pos_err = cfin.ok ? cfin.pos_err : Real(1e9);
-  out_ang_err = cfin.ok ? cfin.ang_err_deg : Real(1e9);
-  out_abs_d = cfin.ok ? cfin.abs_d : Real(1e9);
-  return {cfin.end_p, {best_th, best_ph}};
+  const int maxit=20;
+  Real lambda = 1e-3;
+  for (int it=0; it<maxit; ++it){
+    Real th_try=theta1, ph_try=phi1;
+    Vec3<Real> r0; Real J[3][2];
+    residual_and_jacobian(theta1, phi1, P_star, n_star, seg1, seg2, sc, r0, J);
+    Real a00 = J[0][0]*J[0][0]+J[1][0]*J[1][0]+J[2][0]*J[2][0];
+    Real a01 = J[0][0]*J[0][1]+J[1][0]*J[1][1]+J[2][0]*J[2][1];
+    Real a11 = J[0][1]*J[0][1]+J[1][1]*J[1][1]+J[2][1]*J[2][1];
+    Real g0  = J[0][0]*r0.x + J[1][0]*r0.y + J[2][0]*r0.z;
+    Real g1  = J[0][1]*r0.x + J[1][1]*r0.y + J[2][1]*r0.z;
+    Real r0n2 = r0.dot(r0);
+    bool accepted=false;
+    for (int retry=0; retry<2; ++retry){
+      Real A00=a00+lambda, A01=a01, A11=a11+lambda;
+      Real det = A00*A11 - A01*A01; if (std::abs(det)<1e-20) { lambda*=10; continue; }
+      Real dth = (-A11*g0 + A01*g1)/det;
+      Real dph = ( A01*g0 - A00*g1)/det;
+      th_try = theta1 + dth; ph_try = phi1 + dph;
+      const Real tol_th = Real(1e-4)*(std::numbers::pi_v<Real>/Real(180));
+      if (!clamp_box(th_try, seg1.theta_min, seg1.theta_max, tol_th)) { lambda*=10; continue; }
+      ph_try = seg1.has_phi_bounds ? proj_ang(ph_try, seg1.phi_min, seg1.phi_max) : wrap0(ph_try);
+      auto fk = forward_exact(th_try, ph_try, P_star, n_star, seg1, seg2, sc);
+      Vec3<Real> r1{ fk.end_with_d.x - P_star.x, fk.end_with_d.y - P_star.y, fk.end_with_d.z - P_star.z };
+      Real r1n2 = r1.dot(r1);
+      if (r1n2 < r0n2) { theta1=th_try; phi1=ph_try; lambda = std::max<Real>(1e-6, lambda*0.3); accepted=true; break; }
+      lambda*=10;
+    }
+    if (!accepted) break;
+    if (r0n2 < 1e-18) break;
+  }
+  return true;
 }
 
-// ------------------------------ Python wrappers
-// ------------------------------------------
-static py::object evaluate_once_py(
-    Real theta1, Real phi1,
-    py::array_t<Real, py::array::c_style | py::array::forcecast> P_star_np,
-    py::array_t<Real, py::array::c_style | py::array::forcecast> n_star_np,
-    const SegmentBounds &seg1, const SegmentBounds &seg2,
-    const SolverConst &sc) {
-  auto P = P_star_np.unchecked<1>();
-  auto N = n_star_np.unchecked<1>();
-  const Vec3<Real> P_star{P(0), P(1), P(2)}, n_star{N(0), N(1), N(2)};
-
-  auto c = evaluate_once(theta1, phi1, P_star, n_star, seg1, seg2, sc);
-  if (!c.ok)
-    return py::none();
-
+static py::object solve_impl(
+  py::array_t<Real, py::array::c_style | py::array::forcecast> P_star_np,
+  py::array_t<Real, py::array::c_style | py::array::forcecast> n_star_np,
+  const SegmentBounds& seg1, const SegmentBounds& seg2, const SolverConst& sc,
+  int keep_top)
+{
+  auto P=P_star_np.unchecked<1>(); auto N=n_star_np.unchecked<1>();
+  const Vec3<Real> P_star{P(0),P(1),P(2)}, n_star{N(0),N(1),N(2)};
+  Real theta1=0, phi1=0;
+  if (!solve_outer_lm(P_star, n_star, seg1, seg2, sc, theta1, phi1)) return py::none();
+  Cand c = evaluate_once_core(theta1, phi1, P_star, n_star, seg1, seg2, sc);
+  if (!c.ok) return py::none();
+  py::list out; py::dict d;
+  d["pos_err"]=c.pos_err; d["ang_err_deg"]=c.ang_err_deg;
+  d["translation"]=c.translation; d["abs_d"]=c.abs_d;
+  d["theta1"]=c.theta1; d["phi1"]=c.phi1;
+  d["theta2"]=c.theta2; d["phi2"]=c.phi2; d["l2p"]=c.l2p;
+  Real A1,B1; detail::A_B_scalar_stable_ab(c.theta1, A1,B1);
+  Real sphi1,cphi1; detail::fast_sincos(c.phi1, sphi1,cphi1);
+  const Vec3<Real> p_bend{ sc.s1*A1*cphi1, sc.s1*A1*sphi1, sc.s1*B1 };
+  Vec3<Real> p1{0,0,sc.L1p}; p1 = p1 + p_bend;
   const Mat3<Real> R1 = RzRyRz(c.phi1, c.theta1);
-
-  Real A1, B1;
-  detail::A_B_scalar_stable_ab(c.theta1, A1, B1);
-
-  Real sphi1, cphi1;
-  detail::fast_sincos(c.phi1, sphi1, cphi1);
-  const Vec3<Real> p_bend{sc.s1 * A1 * cphi1, sc.s1 * A1 * sphi1, sc.s1 * B1};
-  Vec3<Real> p1{Real(0), Real(0), sc.L1p};
-  p1 = p1 + p_bend;
-
   const Mat3<Real> R2 = RzRyRz(c.phi2, c.theta2);
-
-  Real A2, B2;
-  detail::A_B_scalar_stable_ab(c.theta2, A2, B2);
-  const Vec3<Real> v2_local{sc.s2_fixed * A2, Real(0), sc.s2_fixed * B2};
+  const Mat3<Real> Rtot = R1.mul(R2);
+  Real A2,B2; detail::A_B_scalar_stable_ab(c.theta2, A2,B2);
   const Mat3<Real> Rz2 = Mat3<Real>::rotZ(c.phi2);
+  const Vec3<Real> v2_local{ sc.s2_fixed*A2, Real(0), sc.s2_fixed*B2 };
   const Vec3<Real> Rz2_v2 = Rz2.apply(v2_local);
-  const Vec3<Real> R2_ez = R2.apply({Real(0), Real(0), Real(1)});
-
-  const Vec3<Real> q_local{Rz2_v2.x + seg2.rigid_tip_length * R2_ez.x,
-                           Rz2_v2.y + seg2.rigid_tip_length * R2_ez.y,
-                           Rz2_v2.z + seg2.rigid_tip_length * R2_ez.z + c.L2p};
-  const Vec3<Real> R1_q = R1.apply(q_local);
-  const Vec3<Real> end_p_no_d{p1.x + R1_q.x, p1.y + R1_q.y, p1.z + R1_q.z};
-
-  const Mat3<Real> Rtot = R1.mul(R2);
-  py::array_t<Real> T({4, 4});
-  auto Tm = T.mutable_unchecked<2>();
-  Tm(0, 0) = Rtot.a00;
-  Tm(0, 1) = Rtot.a01;
-  Tm(0, 2) = Rtot.a02;
-  Tm(0, 3) = end_p_no_d.x;
-  Tm(1, 0) = Rtot.a10;
-  Tm(1, 1) = Rtot.a11;
-  Tm(1, 2) = Rtot.a12;
-  Tm(1, 3) = end_p_no_d.y;
-  Tm(2, 0) = Rtot.a20;
-  Tm(2, 1) = Rtot.a21;
-  Tm(2, 2) = Rtot.a22;
-  Tm(2, 3) = end_p_no_d.z;
-  Tm(3, 0) = 0;
-  Tm(3, 1) = 0;
-  Tm(3, 2) = 0;
-  Tm(3, 3) = 1;
-
-  py::dict d;
-  d["pos_err"] = c.pos_err;
-  d["ang_err_deg"] = c.ang_err_deg;
-  d["translation"] = c.translation;
-  d["abs_d"] = c.abs_d;
-  d["theta1"] = c.theta1;
-  d["phi1"] = c.phi1;
-  d["theta2"] = c.theta2;
-  d["phi2"] = c.phi2;
-  d["L2p"] = c.L2p;
-
-  auto endp0 = py::array_t<Real>(3);
-  auto e0 = endp0.mutable_unchecked<1>();
-  e0(0) = end_p_no_d.x;
-  e0(1) = end_p_no_d.y;
-  e0(2) = end_p_no_d.z;
-  d["end_p"] = endp0;
-
-  auto endp = py::array_t<Real>(3);
-  auto e = endp.mutable_unchecked<1>();
-  e(0) = c.end_p.x;
-  e(1) = c.end_p.y;
-  e(2) = c.end_p.z;
-  d["end_p_world"] = endp;
-
-  auto bw = py::array_t<Real>(3);
-  auto b = bw.mutable_unchecked<1>();
-  b(0) = c.b_world.x;
-  b(1) = c.b_world.y;
-  b(2) = c.b_world.z;
-  d["bevel_world"] = bw;
-
-  d["end_T"] = T;
-  return d;
-}
-
-template <class T> struct TopK {
-  int k;
-  std::vector<T> v;
-  explicit TopK(int kk) : k(kk) { v.reserve(std::max(kk * 3, 16)); }
-  PCC_ALWAYS_INLINE void push(T &&t) { v.emplace_back(std::move(t)); }
-  void shrink() {
-    if ((int)v.size() <= k)
-      return;
-    std::nth_element(v.begin(), v.begin() + k, v.end(),
-                     [](const T &a, const T &b) { return a.J < b.J; });
-    v.resize(k);
-  }
-  void finalize() {
-    shrink();
-    std::sort(v.begin(), v.end(),
-              [](const T &a, const T &b) { return a.J < b.J; });
-  }
-};
-
-static py::list
-phi_scan(Real theta1,
-         py::array_t<Real, py::array::c_style | py::array::forcecast> phi_list,
-         py::array_t<Real, py::array::c_style | py::array::forcecast> P_star_np,
-         py::array_t<Real, py::array::c_style | py::array::forcecast> n_star_np,
-         const SegmentBounds &seg1, const SegmentBounds &seg2,
-         const SolverConst &sc, int k_keep = 6) {
-  auto P = P_star_np.unchecked<1>();
-  auto N = n_star_np.unchecked<1>();
-  const Vec3<Real> P_star{P(0), P(1), P(2)}, n_star{N(0), N(1), N(2)};
-  auto ph = phi_list.unchecked<1>();
-
-  struct Score {
-    Real J;
-    Cand c;
+  const Vec3<Real> R2_ez = R2.apply({Real(0),Real(0),Real(1)});
+  const Real stub = std::max<Real>(Real(0), seg2.rigid_tip_length);
+  const Vec3<Real> pre{0,0,c.l2p};
+  const Vec3<Real> q_local{
+    pre.x + Rz2_v2.x + stub*R2_ez.x,
+    pre.y + Rz2_v2.y + stub*R2_ez.y,
+    pre.z + Rz2_v2.z + stub*R2_ez.z
   };
-  std::vector<Score> merged;
-  merged.reserve(std::max(k_keep * 4, 64));
-
-  {
-    py::gil_scoped_release nogil;
-
-    auto worker = [&](int begin, int end) {
-      pcc_set_thread_qos_interactive();
-      TopK<Score> tk(k_keep);
-      for (int i = begin; i < end; ++i) {
-        auto cand =
-            evaluate_once(theta1, ph(i), P_star, n_star, seg1, seg2, sc);
-        if (!cand.ok)
-          continue;
-        const Real cb = std::clamp(cand.b_world.dot(n_star), Real(-1), Real(1));
-        const Real J = cand.pos_err + Real(1e-3) * (Real(1) - cb) +
-                       Real(1e-7) * cand.abs_d;
-
-        tk.push(Score{J, std::move(cand)});
-      }
-      tk.finalize();
-      return tk.v;
-    };
-
-#if defined(USE_OPENMP)
-    const int n = (int)ph.shape(0);
-    const int T = std::max(1, omp_get_max_threads());
-    const int chunk = (n + T - 1) / T;
-    std::vector<std::vector<Score>> buckets(T);
-#pragma omp parallel
-    {
-      int tid = omp_get_thread_num();
-      int b = tid * chunk, e = std::min(n, b + chunk);
-      buckets[tid] = worker(b, e);
-    }
-    for (auto &vv : buckets) {
-      merged.insert(merged.end(), std::make_move_iterator(vv.begin()),
-                    std::make_move_iterator(vv.end()));
-    }
-#else
-    auto vv = worker(0, (int)ph.shape(0));
-    merged.insert(merged.end(), std::make_move_iterator(vv.begin()),
-                  std::make_move_iterator(vv.end()));
-#endif
-  }
-
-  if ((int)merged.size() > k_keep) {
-    std::nth_element(merged.begin(), merged.begin() + k_keep, merged.end(),
-                     [](const Score &a, const Score &b) { return a.J < b.J; });
-    merged.resize(k_keep);
-  }
-  std::sort(merged.begin(), merged.end(),
-            [](const Score &a, const Score &b) { return a.J < b.J; });
-
-  py::list out;
-  for (auto &s : merged) {
-    const auto &c = s.c;
-    py::dict d;
-    d["pos_err"] = c.pos_err;
-    d["ang_err_deg"] = c.ang_err_deg;
-    d["translation"] = c.translation;
-    d["abs_d"] = c.abs_d;
-    d["theta1"] = c.theta1;
-    d["phi1"] = c.phi1;
-    d["theta2"] = c.theta2;
-    d["phi2"] = c.phi2;
-    d["L2p"] = c.L2p;
-    out.append(std::move(d));
-  }
-  return out;
-}
-
-static py::object brent_refine_phi_py(
-    Real theta1, Real phi_seed, Real halfspan_deg, int maxiter,
-    py::array_t<Real, py::array::c_style | py::array::forcecast> P_star_np,
-    py::array_t<Real, py::array::c_style | py::array::forcecast> n_star_np,
-    const SegmentBounds &seg1, const SegmentBounds &seg2,
-    const SolverConst &sc) {
-  auto P = P_star_np.unchecked<1>();
-  auto N = n_star_np.unchecked<1>();
-  const Vec3<Real> P_star{P(0), P(1), P(2)}, n_star{N(0), N(1), N(2)};
-
-  Real phi_best;
-  Cand cand;
-  {
-    py::gil_scoped_release nogil;
-    std::tie(phi_best, cand) =
-        brent_refine_phi_native(theta1, phi_seed, halfspan_deg, maxiter, P_star,
-                                n_star, seg1, seg2, sc);
-  }
-
-  if (!cand.ok)
-    return py::none();
-
-  const Mat3<Real> R1 = RzRyRz(cand.phi1, cand.theta1);
-
-  Real A1, B1;
-  detail::A_B_scalar_stable_ab(cand.theta1, A1, B1);
-  Real sphi1, cphi1;
-  detail::fast_sincos(cand.phi1, sphi1, cphi1);
-  const Vec3<Real> p_bend{sc.s1 * A1 * cphi1, sc.s1 * A1 * sphi1, sc.s1 * B1};
-  Vec3<Real> p1{Real(0), Real(0), sc.L1p};
-  p1 = p1 + p_bend;
-
-  const Mat3<Real> R2 = RzRyRz(cand.phi2, cand.theta2);
-  Real A2, B2;
-  detail::A_B_scalar_stable_ab(cand.theta2, A2, B2);
-  const Vec3<Real> v2_local{sc.s2_fixed * A2, Real(0), sc.s2_fixed * B2};
-  const Mat3<Real> Rz2 = Mat3<Real>::rotZ(cand.phi2);
-  const Vec3<Real> Rz2_v2 = Rz2.apply(v2_local);
-  const Vec3<Real> R2_ez = R2.apply({Real(0), Real(0), Real(1)});
-
-  const Vec3<Real> q_local{Rz2_v2.x + seg2.rigid_tip_length * R2_ez.x,
-                           Rz2_v2.y + seg2.rigid_tip_length * R2_ez.y,
-                           Rz2_v2.z + seg2.rigid_tip_length * R2_ez.z +
-                               cand.L2p};
   const Vec3<Real> R1_q = R1.apply(q_local);
-  const Vec3<Real> end_p_no_d{p1.x + R1_q.x, p1.y + R1_q.y, p1.z + R1_q.z};
-
-  const Mat3<Real> Rtot = R1.mul(R2);
-  py::array_t<Real> T({4, 4});
-  auto Tm = T.mutable_unchecked<2>();
-  Tm(0, 0) = Rtot.a00;
-  Tm(0, 1) = Rtot.a01;
-  Tm(0, 2) = Rtot.a02;
-  Tm(0, 3) = end_p_no_d.x;
-  Tm(1, 0) = Rtot.a10;
-  Tm(1, 1) = Rtot.a11;
-  Tm(1, 2) = Rtot.a12;
-  Tm(1, 3) = end_p_no_d.y;
-  Tm(2, 0) = Rtot.a20;
-  Tm(2, 1) = Rtot.a21;
-  Tm(2, 2) = Rtot.a22;
-  Tm(2, 3) = end_p_no_d.z;
-  Tm(3, 0) = 0;
-  Tm(3, 1) = 0;
-  Tm(3, 2) = 0;
-  Tm(3, 3) = 1;
-
-  py::dict d;
-  d["phi1"] = phi_best;
-  d["pos_err"] = cand.pos_err;
-  d["ang_err_deg"] = cand.ang_err_deg;
-  d["translation"] = cand.translation;
-  d["abs_d"] = cand.abs_d;
-  d["theta1"] = cand.theta1;
-  d["phi1_eval"] = cand.phi1;
-
-  auto endp0 = py::array_t<Real>(3);
-  auto e0 = endp0.mutable_unchecked<1>();
-  e0(0) = end_p_no_d.x;
-  e0(1) = end_p_no_d.y;
-  e0(2) = end_p_no_d.z;
-  d["end_p"] = endp0;
-  d["end_T"] = T;
-
-  auto endw = py::array_t<Real>(3);
-  auto ew = endw.mutable_unchecked<1>();
-  ew(0) = cand.end_p.x;
-  ew(1) = cand.end_p.y;
-  ew(2) = cand.end_p.z;
-  d["end_p_world"] = endw;
-
-  auto bw = py::array_t<Real>(3);
-  auto b = bw.mutable_unchecked<1>();
-  b(0) = cand.b_world.x;
-  b(1) = cand.b_world.y;
-  b(2) = cand.b_world.z;
-  d["bevel_world"] = bw;
-
-  return d;
+  const Vec3<Real> end_p_no_d{ p1.x + R1_q.x, p1.y + R1_q.y, p1.z + R1_q.z };
+  py::array_t<Real> T({4,4}); auto Tm=T.mutable_unchecked<2>();
+  Tm(0,0)=Rtot.a00; Tm(0,1)=Rtot.a01; Tm(0,2)=Rtot.a02; Tm(0,3)=end_p_no_d.x;
+  Tm(1,0)=Rtot.a10; Tm(1,1)=Rtot.a11; Tm(1,2)=Rtot.a12; Tm(1,3)=end_p_no_d.y;
+  Tm(2,0)=Rtot.a20; Tm(2,1)=Rtot.a21; Tm(2,2)=Rtot.a22; Tm(2,3)=end_p_no_d.z;
+  Tm(3,0)=0; Tm(3,1)=0; Tm(3,2)=0; Tm(3,3)=1;
+  d["end_T"]=T;
+  auto endw = py::array_t<Real>(3); auto ew=endw.mutable_unchecked<1>();
+  ew(0)=c.end_p.x; ew(1)=c.end_p.y; ew(2)=c.end_p.z; d["end_p_world"]=endw;
+  auto bw = py::array_t<Real>(3); auto b=bw.mutable_unchecked<1>();
+  b(0)=c.b_world.x; b(1)=c.b_world.y; b(2)=c.b_world.z; d["bevel_world"]=bw;
+  out.append(std::move(d)); return out;
 }
 
-static py::object lm_polish_py(
-    Real theta1, Real phi1, int iters,
-    py::array_t<Real, py::array::c_style | py::array::forcecast> P_star_np,
-    py::array_t<Real, py::array::c_style | py::array::forcecast> n_star_np,
-    const SegmentBounds &seg1, const SegmentBounds &seg2,
-    const SolverConst &sc) {
-  auto P = P_star_np.unchecked<1>();
-  auto N = n_star_np.unchecked<1>();
-  const Vec3<Real> P_star{P(0), P(1), P(2)}, n_star{N(0), N(1), N(2)};
-
-  Real pos_err, ang_err, abs_d, th_fin, ph_fin;
-  {
-    py::gil_scoped_release nogil;
-    (void)lm_polish_native(theta1, phi1, iters, P_star, n_star, seg1, seg2, sc,
-                           pos_err, ang_err, abs_d, th_fin, ph_fin);
-  }
-
-  const auto cfin =
-      evaluate_once(th_fin, ph_fin, P_star, n_star, seg1, seg2, sc);
-  if (!cfin.ok) {
-    py::dict d;
-    d["theta1"] = th_fin;
-    d["phi1"] = ph_fin;
-    d["pos_err"] = pos_err;
-    d["ang_err_deg"] = ang_err;
-    d["abs_d"] = abs_d;
-    return d;
-  }
-
-  const Mat3<Real> R1 = RzRyRz(cfin.phi1, cfin.theta1);
-
-  Real A1, B1;
-  detail::A_B_scalar_stable_ab(cfin.theta1, A1, B1);
-  Real sphi1, cphi1;
-  detail::fast_sincos(cfin.phi1, sphi1, cphi1);
-  const Vec3<Real> p_bend{sc.s1 * A1 * cphi1, sc.s1 * A1 * sphi1, sc.s1 * B1};
-  Vec3<Real> p1{Real(0), Real(0), sc.L1p};
-  p1 = p1 + p_bend;
-
-  const Mat3<Real> R2 = RzRyRz(cfin.phi2, cfin.theta2);
-  Real A2, B2;
-  detail::A_B_scalar_stable_ab(cfin.theta2, A2, B2);
-  const Vec3<Real> v2_local{sc.s2_fixed * A2, Real(0), sc.s2_fixed * B2};
-  const Mat3<Real> Rz2 = Mat3<Real>::rotZ(cfin.phi2);
-  const Vec3<Real> Rz2_v2 = Rz2.apply(v2_local);
-  const Vec3<Real> R2_ez = R2.apply({Real(0), Real(0), Real(1)});
-
-  const Vec3<Real> q_local{Rz2_v2.x + seg2.rigid_tip_length * R2_ez.x,
-                           Rz2_v2.y + seg2.rigid_tip_length * R2_ez.y,
-                           Rz2_v2.z + seg2.rigid_tip_length * R2_ez.z +
-                               cfin.L2p};
-  const Vec3<Real> R1_q = R1.apply(q_local);
-  const Vec3<Real> end_p_no_d{p1.x + R1_q.x, p1.y + R1_q.y, p1.z + R1_q.z};
-
-  const Mat3<Real> Rtot = R1.mul(R2);
-  py::array_t<Real> T({4, 4});
-  auto Tm = T.mutable_unchecked<2>();
-  Tm(0, 0) = Rtot.a00;
-  Tm(0, 1) = Rtot.a01;
-  Tm(0, 2) = Rtot.a02;
-  Tm(0, 3) = end_p_no_d.x;
-  Tm(1, 0) = Rtot.a10;
-  Tm(1, 1) = Rtot.a11;
-  Tm(1, 2) = Rtot.a12;
-  Tm(1, 3) = end_p_no_d.y;
-  Tm(2, 0) = Rtot.a20;
-  Tm(2, 1) = Rtot.a21;
-  Tm(2, 2) = Rtot.a22;
-  Tm(2, 3) = end_p_no_d.z;
-  Tm(3, 0) = 0;
-  Tm(3, 1) = 0;
-  Tm(3, 2) = 0;
-  Tm(3, 3) = 1;
-
-  py::dict d;
-  d["theta1"] = th_fin;
-  d["phi1"] = ph_fin;
-  d["pos_err"] = pos_err;
-  d["ang_err_deg"] = ang_err;
-  d["abs_d"] = abs_d;
-
-  auto endp0 = py::array_t<Real>(3);
-  auto e0 = endp0.mutable_unchecked<1>();
-  e0(0) = end_p_no_d.x;
-  e0(1) = end_p_no_d.y;
-  e0(2) = end_p_no_d.z;
-  d["end_p"] = endp0;
-  d["end_T"] = T;
-
-  auto endw = py::array_t<Real>(3);
-  auto ew = endw.mutable_unchecked<1>();
-  ew(0) = cfin.end_p.x;
-  ew(1) = cfin.end_p.y;
-  ew(2) = cfin.end_p.z;
-  d["end_p_world"] = endw;
-
-  auto bw = py::array_t<Real>(3);
-  auto b = bw.mutable_unchecked<1>();
-  b(0) = cfin.b_world.x;
-  b(1) = cfin.b_world.y;
-  b(2) = cfin.b_world.z;
-  d["bevel_world"] = bw;
-
-  return d;
+static py::object solve_py(
+  py::array_t<Real, py::array::c_style | py::array::forcecast> P_star_np,
+  py::array_t<Real, py::array::c_style | py::array::forcecast> n_star_np,
+  const SegmentBounds& seg1, const SegmentBounds& seg2, const SolverConst& sc,
+  int keep_top = 1)
+{
+  return solve_impl(P_star_np, n_star_np, seg1, seg2, sc, keep_top);
 }
 
-// ------------------------------ pybind11 module
-// ------------------------------------------
 PYBIND11_MODULE(_core, m) {
   py::class_<SegmentBounds>(m, "SegmentBounds")
-      .def(py::init<>())
-      .def_readwrite("theta_min", &SegmentBounds::theta_min)
-      .def_readwrite("theta_max", &SegmentBounds::theta_max)
-      .def_readwrite("has_phi_bounds", &SegmentBounds::has_phi_bounds)
-      .def_readwrite("phi_min", &SegmentBounds::phi_min)
-      .def_readwrite("phi_max", &SegmentBounds::phi_max)
-      .def_readwrite("L_min", &SegmentBounds::L_min)
-      .def_readwrite("L_max", &SegmentBounds::L_max)
-      .def_readwrite("passive_L_min", &SegmentBounds::passive_L_min)
-      .def_readwrite("passive_L_max", &SegmentBounds::passive_L_max)
-      .def_readwrite("active_L_max", &SegmentBounds::active_L_max)
-      .def_readwrite("bevel_angle_deg", &SegmentBounds::bevel_angle_deg)
-      .def_readwrite("rigid_tip_length", &SegmentBounds::rigid_tip_length);
+    .def(py::init<>())
+    .def_readwrite("theta_min", &SegmentBounds::theta_min)
+    .def_readwrite("theta_max", &SegmentBounds::theta_max)
+    .def_readwrite("has_phi_bounds", &SegmentBounds::has_phi_bounds)
+    .def_readwrite("phi_min", &SegmentBounds::phi_min)
+    .def_readwrite("phi_max", &SegmentBounds::phi_max)
+    .def_readwrite("L_min", &SegmentBounds::L_min)
+    .def_readwrite("L_max", &SegmentBounds::L_max)
+    .def_readwrite("passive_L_min", &SegmentBounds::passive_L_min)
+    .def_readwrite("passive_L_max", &SegmentBounds::passive_L_max)
+    .def_readwrite("active_L_max", &SegmentBounds::active_L_max)
+    .def_readwrite("bevel_angle_deg", &SegmentBounds::bevel_angle_deg)
+    .def_readwrite("rigid_tip_length", &SegmentBounds::rigid_tip_length);
 
   py::class_<SolverConst>(m, "SolverConst")
-      .def(py::init<>())
-      .def_readwrite("s1", &SolverConst::s1)
-      .def_readwrite("L1p", &SolverConst::L1p)
-      .def_readwrite("s2_fixed", &SolverConst::s2_fixed)
-      .def_readwrite("d_min", &SolverConst::d_min)
-      .def_readwrite("d_max", &SolverConst::d_max)
-      .def_readwrite("pos_tol", &SolverConst::pos_tol)
-      .def_readwrite("bevel_tol_deg", &SolverConst::bevel_tol_deg)
-      .def_readwrite("angle_target_deg", &SolverConst::angle_target_deg);
+    .def(py::init<>())
+    .def_readwrite("s1", &SolverConst::s1)
+    .def_readwrite("L1p", &SolverConst::L1p)
+    .def_readwrite("s2_fixed", &SolverConst::s2_fixed)
+    .def_readwrite("d_min", &SolverConst::d_min)
+    .def_readwrite("d_max", &SolverConst::d_max)
+    .def_readwrite("pos_tol", &SolverConst::pos_tol)
+    .def_readwrite("bevel_tol_deg", &SolverConst::bevel_tol_deg)
+    .def_readwrite("angle_target_deg", &SolverConst::angle_target_deg);
 
-  m.def("phi_scan", &phi_scan, py::arg("theta1"), py::arg("phi_list"),
-        py::arg("P_star"), py::arg("n_star"), py::arg("seg1"), py::arg("seg2"),
-        py::arg("sc"), py::arg("k_keep") = 6);
-
-  m.def("evaluate_once", &evaluate_once_py, py::arg("theta1"), py::arg("phi1"),
-        py::arg("P_star"), py::arg("n_star"), py::arg("seg1"), py::arg("seg2"),
-        py::arg("sc"));
-
-  m.def("brent_refine_phi", &brent_refine_phi_py, py::arg("theta1"),
-        py::arg("phi_seed"), py::arg("halfspan_deg"), py::arg("maxiter"),
-        py::arg("P_star"), py::arg("n_star"), py::arg("seg1"), py::arg("seg2"),
-        py::arg("sc"));
-
-  m.def("lm_polish", &lm_polish_py, py::arg("theta1"), py::arg("phi1"),
-        py::arg("iters"), py::arg("P_star"), py::arg("n_star"), py::arg("seg1"),
-        py::arg("seg2"), py::arg("sc"));
+  m.def("solve", &solve_py,
+        py::arg("P_star"), py::arg("n_star"),
+        py::arg("seg1"), py::arg("seg2"), py::arg("sc"),
+        py::arg("keep_top") = 1);
 }
